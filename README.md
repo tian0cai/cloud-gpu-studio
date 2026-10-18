@@ -32,7 +32,7 @@ npm install
 npm run tauri dev
 ```
 
-Build a macOS app with `npm run tauri build -- --bundles app`. The application bundle includes the deployment scripts and public model manifest as Tauri resources. `CLOUD_GPU_STUDIO_HOME` can point to a source checkout instead. Runtime configuration is stored under `work/` beside a source checkout, or under `~/.cloud-gpu-studio/` for an installed bundle. `CLOUD_GPU_STUDIO_WORK_DIR` overrides that location.
+Build a macOS app and DMG installer with `npm run tauri build -- --bundles app,dmg`. The application bundle includes the deployment scripts and public model manifest as Tauri resources. `CLOUD_GPU_STUDIO_HOME` can point to a source checkout instead. Runtime configuration is stored under `work/` beside a source checkout, or under `~/.cloud-gpu-studio/` for an installed bundle. `CLOUD_GPU_STUDIO_WORK_DIR` overrides that location.
 
 ## User-selected model files
 
@@ -70,7 +70,7 @@ Model weights and third-party custom nodes are not redistributed here. Check the
 
 The installed app checks the latest GitHub Release on startup. **Accounts → App updates** can check again and install a signed update. This update mechanism applies to the desktop app; the local ComfyUI installation has separate controls on the ComfyUI page. Only a published release is offered as an update; draft releases are for review.
 
-To prepare a release, run `npm run version:set -- 0.2.0`, commit the version change, and run `npm run release:build` on macOS to inspect the signed `.app` and updater archive. `npm run release:publish` creates and pushes a version tag; GitHub Actions builds a **draft** macOS Apple Silicon release. Review its assets and publish the draft in GitHub to enable automatic update checks. The CI repository must contain `TAURI_SIGNING_PRIVATE_KEY` (the private updater key held by the maintainer) and, if the key has a password, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. The public verification key is in `src-tauri/tauri.conf.json`. Never commit, chat, or publish the private key. Losing it prevents existing installations from accepting future updates. This first release pipeline targets macOS Apple Silicon; Windows, Linux, and Intel macOS have not been validated.
+To prepare a release, run `npm run version:set -- 0.2.0`, commit the version change, and run `npm run release:build` on macOS to inspect the signed `.app`, DMG installer, and updater archive. `npm run release:publish` creates and pushes a version tag; GitHub Actions builds a **draft** macOS Apple Silicon release. Review its assets and publish the draft in GitHub to enable automatic update checks. The CI repository must contain `TAURI_SIGNING_PRIVATE_KEY` (the private updater key held by the maintainer) and, if the key has a password, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. The public verification key is in `src-tauri/tauri.conf.json`. Never commit, chat, or publish the private key. Losing it prevents existing installations from accepting future updates. This first release pipeline targets macOS Apple Silicon; Windows, Linux, and Intel macOS have not been validated.
 
 The app uses ad-hoc macOS signing in CI. A broadly distributed macOS app should also receive an Apple Developer ID signature and notarization before a public release; otherwise Gatekeeper may interrupt installation.
 

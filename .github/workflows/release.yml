@@ -37,4 +37,4 @@ jobs:
           releaseBody: 'Review the assets and publish this draft to make the update available.'
           releaseDraft: true
           prerelease: false
-          args: --target aarch64-apple-darwin --bundles app
+          args: --target aarch64-apple-darwin --bundles app,dmg

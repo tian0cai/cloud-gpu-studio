@@ -36,7 +36,7 @@ npm run tauri dev
 
 安装版启动时检查 GitHub 上已公开的最新 Release。“账户设置 → 应用更新”也可手动检查并安装。更新包由 Tauri 验证签名；本地 ComfyUI 的更新按钮与桌面应用更新分开。
 
-维护者先运行 `npm run version:set -- 0.2.0`，提交版本变更，再运行 `npm run release:check` 与 `npm run release:build`。`npm run release:publish` 会创建并推送版本标签；GitHub Actions 构建 **草稿 Release**，检查产物后在 GitHub 手动公开，届时用户才会收到升级提示。CI 需要设置仓库密钥 `TAURI_SIGNING_PRIVATE_KEY`；若私钥有密码，还需要 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。私钥只保留在安全位置，绝不能提交、聊天传输或公开。当前发布流程仅验证 macOS Apple Silicon；公开分发前还建议配置 Apple Developer ID 签名及公证。
+维护者先运行 `npm run version:set -- 0.2.0`，提交版本变更，再运行 `npm run release:check` 与 `npm run release:build`，检查生成的 DMG 安装包和签名更新包。`npm run release:publish` 会创建并推送版本标签；GitHub Actions 构建 **草稿 Release**，检查产物后在 GitHub 手动公开，届时用户才会收到升级提示。CI 需要设置仓库密钥 `TAURI_SIGNING_PRIVATE_KEY`；若私钥有密码，还需要 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。私钥只保留在安全位置，绝不能提交、聊天传输或公开。当前发布流程仅验证 macOS Apple Silicon；公开分发前还建议配置 Apple Developer ID 签名及公证。
 
 ## 许可
 

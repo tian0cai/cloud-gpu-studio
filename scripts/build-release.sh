@@ -11,5 +11,5 @@ if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
     exit 1
   fi
 fi
-npm run tauri build -- --bundles app
-echo 'Signed application and update archive are in src-tauri/target/release/bundle/macos.'
+npm run tauri build -- --bundles app,dmg
+echo 'Signed application and update archive are in src-tauri/target/release/bundle/macos; installer DMG is in src-tauri/target/release/bundle/dmg.'
