@@ -75,7 +75,12 @@ def stop():
         print('No tracked GPU Pod.')
         return
     if current_pod():
-        request('pods/' + pid, method='DELETE')
+        try:
+            request('pods/' + pid, method='DELETE')
+        except RuntimeError as error:
+            # A concurrent cancellation may have deleted it after the lookup.
+            if 'HTTP 404' not in str(error):
+                raise
     for _ in range(24):
         if not current_pod():
             print('GPU Pod and its disposable volume deleted. Local images and videos are unchanged.')
@@ -266,6 +271,39 @@ def start():
         raise
 
 
+def resume():
+    pod = current_pod()
+    if not pod:
+        raise RuntimeError('No tracked RunPod machine is available to resume.')
+    print('Checking existing RunPod machine before continuing deployment...', flush=True)
+    for _ in range(90):
+        info = ssh_info(pod['id'])
+        if info and subprocess.run(ssh_command(info, 'true'), capture_output=True, timeout=25).returncode == 0:
+            break
+        time.sleep(10)
+    else:
+        raise RuntimeError('The existing RunPod machine did not become reachable by SSH.')
+    s = state()
+    s['metrics_ssh'] = info
+    save_state(s)
+    print('GPU_SSH_READY', flush=True)
+    health = subprocess.run(ssh_command(info, 'curl -fsS --max-time 3 http://127.0.0.1:8188/system_stats'),
+                            capture_output=True, timeout=25)
+    if health.returncode == 0:
+        print('CLOUD_READY', flush=True)
+        return
+    selected_manifest = manifest()
+    subprocess.run(ssh_command(info, 'mkdir -p /workspace/bootstrap'), check=True)
+    subprocess.run(['scp', *info['options'], '-P', info['port'],
+                    str(DEPLOYABLE / 'setup_remote.sh'), str(DEPLOYABLE / 'download_models.py'),
+                    info['host'] + ':/workspace/bootstrap/'], check=True)
+    subprocess.run(['scp', *info['options'], '-P', info['port'], str(selected_manifest),
+                    info['host'] + ':/workspace/bootstrap/models.lock.json'], check=True)
+    print('Continuing installation and model download on the existing machine...', flush=True)
+    subprocess.run(ssh_command(info, 'bash /workspace/bootstrap/setup_remote.sh'), check=True, timeout=9000)
+    print('CLOUD_READY', flush=True)
+
+
 def connect():
     pod = current_pod()
     if not pod:
@@ -280,7 +318,7 @@ def connect():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Disposable RunPod GPU deployment')
-    parser.add_argument('command', choices=['status', 'offers', 'start', 'stop', 'connect', 'guard'])
+    parser.add_argument('command', choices=['status', 'offers', 'start', 'resume', 'stop', 'connect', 'guard'])
     command = parser.parse_args().command
     if command == 'status':
         s = state()
@@ -293,4 +331,4 @@ if __name__ == '__main__':
     elif command == 'offers':
         print(json.dumps(offer_catalog(selected_price_limit())))
     else:
-        {'start': start, 'stop': stop, 'connect': connect, 'guard': guard}[command]()
+        {'start': start, 'resume': resume, 'stop': stop, 'connect': connect, 'guard': guard}[command]()

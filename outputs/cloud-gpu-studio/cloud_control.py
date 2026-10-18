@@ -103,8 +103,10 @@ def main():
     if command == 'prepare-fl2va':
         prepare_mode('fl2va')
         return 0
-    if command == 'start':
+    if command in ('start', 'resume'):
         selected = read()['provider']
+        if command == 'resume' and active_provider():
+            selected = active_provider()
         if active_provider() and active_provider() != selected:
             raise RuntimeError('Delete the current cloud machine before switching providers.')
         ACTIVE.write_text(json.dumps({'provider': selected}) + '\n')

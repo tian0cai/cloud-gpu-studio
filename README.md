@@ -20,6 +20,7 @@ The public presets use model files from the official Comfy-Org MiniMax H3 and Qw
 - Open or stop a local ComfyUI window. The bridge nodes run jobs on the cloud ComfyUI over an SSH tunnel and save results under the local ComfyUI output directory. The local panel shows whether the process is running, and **Close ComfyUI** stops it so it does not stay resident in memory.
 - Install or repair the local ComfyUI from the official GitHub repository, check for updates, and update it from inside the app. Updating a running local ComfyUI asks first, stops it, then restarts it after the update. Existing workflows, custom nodes, and outputs are preserved.
 - Delete the cloud instance and its temporary storage. RunPod has a time and spending guard; Vast.ai has a spending guard.
+- Cancel a deployment while a machine is starting or downloading models without deleting the cloud instance. The machine keeps billing until you explicitly delete it; **Connect to existing machine** resumes installation if it was interrupted.
 
 The **Open ComfyUI** button starts the local ComfyUI independently of the cloud GPU, so workflows and prompts can be edited before provisioning or while the remote machine starts. Cloud bridge nodes require a connected remote GPU when a job is queued.
 

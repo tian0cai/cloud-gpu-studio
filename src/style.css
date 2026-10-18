@@ -71,6 +71,8 @@
 .hero h2{font-size:20px;margin:7px 0 4px}
 .hero p{line-height:1.45}
 .hero .actions{margin-top:14px}
+.hero .actions{flex-wrap:wrap}
+.hero .actions #cancel-launch{background:#342d25;border-color:#776042;color:#f0d1a0}
 .hero-note{margin-top:10px}
 @media(max-width:1100px){.header-art{right:125px;width:76px;height:76px}.header-orbit{width:70px;height:70px}.header-core{width:42px;height:42px;font-size:23px}}
 

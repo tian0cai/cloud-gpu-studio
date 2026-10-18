@@ -15,6 +15,7 @@ type Status = {
   localReady: boolean;
   tunnelReady: boolean;
   busy: boolean;
+  launching: boolean;
 };
 type ModelFile = { repo: string; revision: string; filename: string; destination: string; size: number; sha256: string };
 type ImageModel = 'qwen' | 'local-qwen' | 'checkpoint' | 'none';
@@ -68,8 +69,8 @@ app.innerHTML = `
         </div>
         <div class="hero">
           <div class="hero-copy"><div class="hero-kicker">INSTANCE CONTROL</div><h2>启动云端机器</h2><p>可先在 ComfyUI 页面编辑工作流，再按模型方案启动云端 GPU。</p>
-          <div class="actions"><button id="launch" class="primary">启动并连接 <span>↗</span></button><button id="open-comfy" class="open-comfy" disabled>打开 ComfyUI ↗</button><button id="stop-comfy" type="button" disabled title="停止本地 ComfyUI 进程（127.0.0.1:8188）">关闭 ComfyUI</button><button id="delete" class="danger" disabled>删除云端机器</button></div>
-          <div class="hero-note">关闭应用不会删除云端机器；本地 ComfyUI 会保持运行，可用“关闭 ComfyUI”随时停止。删除仅在点击按钮后执行。</div></div>
+          <div class="actions"><button id="launch" class="primary">启动并连接 <span>↗</span></button><button id="open-comfy" class="open-comfy" disabled>打开 ComfyUI ↗</button><button id="stop-comfy" type="button" disabled title="停止本地 ComfyUI 进程（127.0.0.1:8188）">关闭 ComfyUI</button><button id="cancel-launch" type="button" hidden>取消部署</button><button id="delete" class="danger" disabled>删除云端机器</button></div>
+          <div class="hero-note">取消部署会保留仍在计费的机器；只有点击“删除云端机器”才会释放它。关闭应用也不会自动删除机器。</div></div>
         </div>
         <div class="metrics"><div class="metric"><span>云端机器</span><strong id="pod-value">检查中</strong><small id="pod-detail">云端实例</small></div><div class="metric"><span>运行价格</span><strong id="price-value">—</strong><small>美元 / 小时</small></div><div class="metric"><span>账户余额</span><strong id="balance-value">—</strong><small>美元</small></div><div class="metric"><span>连接状态</span><strong id="connection-value">检查中</strong><small id="connection-detail">本地端口 8188 / 8189</small></div></div>
         <div class="telemetry"><div class="section-head"><div><div class="eyebrow">LIVE TELEMETRY</div><h3>远程资源使用情况</h3></div><span id="telemetry-status">云端未启动</span></div><div class="telemetry-grid">
@@ -217,6 +218,7 @@ void checkAppUpdate();
 const el = <T extends Element>(id: string) => document.getElementById(id) as unknown as T;
 const launch = el<HTMLButtonElement>('launch');
 const remove = el<HTMLButtonElement>('delete');
+const cancelButton = el<HTMLButtonElement>('cancel-launch');
 const log = el<HTMLDivElement>('log-lines');
 const providerSelect = el<HTMLSelectElement>('provider');
 const imageSelect = el<HTMLSelectElement>('image-model');
@@ -234,7 +236,7 @@ let lastModelPercent: number | null = null;
 let lastStageIndex = 0;
 let nativeOpened = false;
 let refreshing = false;
-let progressMode: 'start' | 'delete' = 'start';
+let progressMode: 'start' | 'cancel' | 'delete' = 'start';
 let packDirty = false;
 let localComfy: LocalComfy | null = null;
 let localBusy = false;
@@ -251,6 +253,7 @@ const metricsHistory: Record<string, number[]> = { cpu: [], gpu: [], ram: [], vr
 
 const startSteps = ['创建机器', '启动 GPU', '安装与下载', '校验与启动', '连接隧道', '本地界面'];
 const deleteSteps = ['提交删除', '释放云端资源', '确认完成'];
+const cancelSteps = ['提交取消', '停止部署', '机器保留'];
 
 function renderHome() {
   const provider = savedSettings?.provider === 'vast' ? 'Vast.ai' : 'RunPod';
@@ -291,10 +294,11 @@ function appendLog(message: string, level = 'info') {
 function setProgress(progress: Progress) {
   const previousPhase = currentPhase;
   if (progress.phase === 'deleting' || progress.phase === 'deleted') progressMode = 'delete';
+  else if (progress.phase === 'cancelling' || progress.phase === 'cancelled') progressMode = 'cancel';
   else if (progress.phase === 'creating') progressMode = 'start';
   if (progress.phase !== 'working') currentPhase = progress.phase;
-  el<HTMLElement>('progress-title').textContent = progressMode === 'delete' ? '删除进度' : '启动进度';
-  const labels = progressMode === 'delete' ? deleteSteps : startSteps;
+  el<HTMLElement>('progress-title').textContent = progressMode === 'delete' ? '删除进度' : progressMode === 'cancel' ? '取消进度' : '启动进度';
+  const labels = progressMode === 'delete' ? deleteSteps : progressMode === 'cancel' ? cancelSteps : startSteps;
   if (el<HTMLDivElement>('progress-steps').children.length !== labels.length) renderSteps(labels);
   const percent = progress.phase === 'error' ? lastPercent : Math.max(lastPercent, progress.percent);
   lastPercent = percent;
@@ -305,20 +309,21 @@ function setProgress(progress: Progress) {
   message.classList.toggle('error', progress.level === 'error');
   const model = el<HTMLDivElement>('model-progress');
   if (progress.modelPercent !== null) lastModelPercent = progress.modelPercent;
-  if (['cloud-ready', 'tunnel', 'local', 'ready', 'deleting', 'deleted'].includes(progress.phase)) lastModelPercent = null;
+  if (['cloud-ready', 'tunnel', 'local', 'ready', 'deleting', 'deleted', 'cancelling', 'cancelled'].includes(progress.phase)) lastModelPercent = null;
   model.hidden = lastModelPercent === null;
   if (lastModelPercent !== null) model.textContent = `模型数据下载：${lastModelPercent}%`;
   const order: Record<string, number> = { creating: 0, booting: 1, installing: 2, downloading: 2,
     verifying: 3, 'cloud-ready': 3, tunnel: 4, local: 5, ready: 6 };
   let index = progressMode === 'delete' ? (progress.phase === 'deleted' ? 2 : 1)
+    : progressMode === 'cancel' ? (progress.phase === 'cancelled' ? 2 : 1)
     : (order[progress.phase] ?? order[previousPhase] ?? 0);
   if (progressMode === 'start') { lastStageIndex = Math.max(lastStageIndex, index); index = lastStageIndex; }
   document.querySelectorAll<HTMLElement>('#progress-steps span').forEach((step, i) => {
-    step.classList.toggle('done', progress.phase === 'ready' || progress.phase === 'deleted' || (index >= 0 && i < index));
-    step.classList.toggle('current', index === i && !['ready', 'deleted', 'error'].includes(progress.phase));
+    step.classList.toggle('done', ['ready', 'deleted', 'cancelled'].includes(progress.phase) || (index >= 0 && i < index));
+    step.classList.toggle('current', index === i && !['ready', 'deleted', 'cancelled', 'error'].includes(progress.phase));
   });
   if (progress.level === 'error') lastError = progress.message;
-  el<HTMLElement>('home-activity-title').textContent = progress.level === 'error' ? '操作遇到问题' : progressMode === 'delete' ? '正在删除云端机器' : progress.phase === 'ready' ? '云端机器已就绪' : '正在准备云端机器';
+  el<HTMLElement>('home-activity-title').textContent = progress.level === 'error' ? '操作遇到问题' : progressMode === 'delete' ? '正在删除云端机器' : progressMode === 'cancel' ? '正在取消部署' : progress.phase === 'ready' ? '云端机器已就绪' : '正在准备云端机器';
   el<HTMLElement>('home-activity-message').textContent = progress.message;
   el<HTMLElement>('home-progress-label').textContent = `${percent}%`;
   el<HTMLElement>('home-progress-fill').style.width = `${percent}%`;
@@ -327,7 +332,10 @@ function setProgress(progress: Progress) {
 
 function updateControls() {
   launch.disabled = operating || Boolean(latestStatus?.busy) || !savedSettings?.keys[savedSettings.provider] || configDirty || (!latestStatus?.podId && !selectedOffer);
-  remove.disabled = operating || Boolean(latestStatus?.busy) || !latestStatus?.podId;
+  const canInterruptLaunch = (!operating && Boolean(latestStatus?.launching)) || (operating && progressMode === 'start');
+  cancelButton.hidden = !canInterruptLaunch;
+  cancelButton.disabled = !canInterruptLaunch;
+  remove.disabled = canInterruptLaunch ? false : operating || Boolean(latestStatus?.busy) || !latestStatus?.podId;
   launch.innerHTML = latestStatus?.podId ? '连接已有机器 <span>↗</span>' : '启动并连接 <span>↗</span>';
   const locked = operating || Boolean(latestStatus?.busy) || Boolean(latestStatus?.podId);
   el<HTMLButtonElement>('query-offers').disabled = locked || queryingOffers || configDirty || !savedSettings?.keys[savedSettings.provider];
@@ -677,10 +685,18 @@ el<HTMLSelectElement>('gpu-filter').addEventListener('change', () => {
 });
 
 remove.addEventListener('click', async () => {
+  const interruptedLaunch = Boolean(latestStatus?.launching) || (progressMode === 'start' && operating);
   operating = true; progressMode = 'delete'; lastError = ''; lastPercent = 0; lastModelPercent = null; updateControls();
-  setProgress({ phase: 'deleting', message: '正在提交删除请求…', percent: 5, modelPercent: null, level: 'info' });
+  setProgress({ phase: 'deleting', message: interruptedLaunch ? '正在停止部署并删除机器…' : '正在提交删除请求…', percent: 5, modelPercent: null, level: 'info' });
   try { await invoke('delete_cloud'); }
-  catch (error) { operating = false; setProgress({ phase: 'error', message: String(error), percent: 0, modelPercent: null, level: 'error' }); updateControls(); }
+  catch (error) { operating = false; if (interruptedLaunch) progressMode = 'start'; setProgress({ phase: 'error', message: String(error), percent: 0, modelPercent: null, level: 'error' }); updateControls(); }
+});
+
+cancelButton.addEventListener('click', async () => {
+  operating = true; progressMode = 'cancel'; lastError = ''; lastPercent = 0; lastModelPercent = null; updateControls();
+  setProgress({ phase: 'cancelling', message: '正在停止部署；云端机器会保留并继续计费。', percent: 5, modelPercent: null, level: 'info' });
+  try { await invoke('cancel_launch'); }
+  catch (error) { operating = false; progressMode = 'start'; setProgress({ phase: 'error', message: String(error), percent: 0, modelPercent: null, level: 'error' }); updateControls(); }
 });
 
 el<HTMLButtonElement>('open-comfy').addEventListener('click', async () => {
@@ -868,7 +884,11 @@ for (const provider of ['runpod', 'vast'] as const) {
   });
 }
 
-await listen<Progress>('deployment-progress', event => setProgress(event.payload));
+await listen<Progress>('deployment-progress', event => {
+  if (operating && progressMode !== 'start' &&
+      ['creating', 'booting', 'installing', 'downloading', 'verifying', 'cloud-ready', 'tunnel', 'local', 'ready'].includes(event.payload.phase)) return;
+  setProgress(event.payload);
+});
 await listen('gpu-ssh-ready', () => { void refresh().then(() => pollMetrics()); });
 await listen<string>('comfy-progress', event => { el<HTMLElement>('local-comfy-progress').textContent = event.payload; });
 await listen<{ok: boolean; message: string}>('comfy-finished', async event => {

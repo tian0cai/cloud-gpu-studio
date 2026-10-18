@@ -5,7 +5,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::os::unix::process::CommandExt;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -108,6 +109,9 @@ fn configure_child(process: &mut Command) {
 #[derive(Default)]
 struct Controller {
     busy: AtomicBool,
+    launching: AtomicBool,
+    cancelling: AtomicBool,
+    launch_pid: AtomicU32,
     local_starting: AtomicBool,
     tunnel: Mutex<Option<Child>>,
     local: Mutex<Option<Child>>,
@@ -243,30 +247,41 @@ fn report_line(app: &AppHandle, line: &str) {
     emit(app, phase, display, percent, model, "info");
 }
 
-fn run_script_stream(app: &AppHandle, command: &str, offer: Option<(&str, f64)>) -> Result<(), String> {
+fn run_script_stream(app: &AppHandle, command: &str, offer: Option<(&str, f64)>, controller: Option<Arc<Controller>>) -> Result<(), String> {
+    if controller.as_ref().is_some_and(|shared| shared.cancelling.load(Ordering::SeqCst)) {
+        return Err("部署已取消。".into());
+    }
     let control = project_root().join(SCRIPTS).join("cloud_control.py");
     if !control.exists() {
         return Err(format!("找不到云端控制脚本：{}", control.display()));
     }
     let mut process = script(command);
+    if command == "start" || command == "resume" { process.process_group(0); }
     if let Some((id, limit)) = offer {
         process.env("CLOUD_GPU_STUDIO_OFFER_ID", id)
             .env("CLOUD_GPU_STUDIO_MAX_HOURLY", limit.to_string());
     }
     let mut child = process.stdout(Stdio::piped()).stderr(Stdio::piped())
         .spawn().map_err(|e| format!("无法运行部署脚本：{e}"))?;
+    if let Some(shared) = &controller { shared.launch_pid.store(child.id(), Ordering::SeqCst); }
     let stderr = child.stderr.take().ok_or("无法读取脚本错误输出")?;
     let app_for_stderr = app.clone();
+    let stderr_controller = controller.clone();
     let stderr_thread = thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            report_line(&app_for_stderr, &line);
+            if !stderr_controller.as_ref().is_some_and(|shared| shared.cancelling.load(Ordering::SeqCst)) {
+                report_line(&app_for_stderr, &line);
+            }
         }
     });
     let stdout = child.stdout.take().ok_or("无法读取脚本输出")?;
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        report_line(app, &line);
+        if !controller.as_ref().is_some_and(|shared| shared.cancelling.load(Ordering::SeqCst)) {
+            report_line(app, &line);
+        }
     }
     let exit = child.wait().map_err(|e| format!("等待脚本结束失败：{e}"))?;
+    if let Some(shared) = &controller { shared.launch_pid.store(0, Ordering::SeqCst); }
     let _ = stderr_thread.join();
     if exit.success() { Ok(()) } else { Err(format!("{command} 执行失败（退出码 {}），请查看上方日志。", exit.code().unwrap_or(-1))) }
 }
@@ -292,7 +307,12 @@ fn connect_tunnel(app: &AppHandle, controller: &Controller) -> Result<(), String
     let child = script("connect").stdout(Stdio::null()).stderr(Stdio::from(log))
         .spawn().map_err(|e| format!("SSH 隧道启动失败：{e}"))?;
     *controller.tunnel.lock().map_err(|_| "隧道状态锁定失败")? = Some(child);
-    if wait_port(8189, 45) { Ok(()) } else { Err(format!("SSH 隧道未能连接。请查看 {}", log_path.display())) }
+    for _ in 0..90 {
+        if controller.cancelling.load(Ordering::SeqCst) { return Err("部署已取消。".into()); }
+        if port_open(8189) { return Ok(()); }
+        thread::sleep(Duration::from_millis(500));
+    }
+    Err(format!("SSH 隧道未能连接。请查看 {}", log_path.display()))
 }
 
 fn start_local(app: &AppHandle, controller: &Controller, deployment_progress: bool) -> Result<(), String> {
@@ -341,6 +361,7 @@ struct Status {
     local_ready: bool,
     tunnel_ready: bool,
     busy: bool,
+    launching: bool,
 }
 
 fn read_status(controller: &Controller) -> Result<Status, String> {
@@ -360,6 +381,7 @@ fn read_status(controller: &Controller) -> Result<Status, String> {
         local_ready: port_open(8188),
         tunnel_ready: port_open(8189),
         busy: controller.busy.load(Ordering::SeqCst),
+        launching: controller.launching.load(Ordering::SeqCst),
     })
 }
 
@@ -585,28 +607,122 @@ fn launch(app: AppHandle, controller: State<'_, Arc<Controller>>,
           offer_id: Option<String>, max_price: Option<f64>) -> Result<(), String> {
     begin(&controller)?;
     let shared = controller.inner().clone();
+    shared.launching.store(true, Ordering::SeqCst);
+    shared.cancelling.store(false, Ordering::SeqCst);
     thread::spawn(move || {
         let local_app = app.clone();
         let local_controller = shared.clone();
         let local_worker = thread::spawn(move || start_local(&local_app, &local_controller, false));
         let result = (|| -> Result<(), String> {
-            if cloud_exists()? {
-                emit(&app, "booting", "检测到已有云端机器，正在连接…", 15, None, "info");
+            if shared.cancelling.load(Ordering::SeqCst) { return Ok(()); }
+            let existing = cloud_exists()?;
+            if shared.cancelling.load(Ordering::SeqCst) { return Ok(()); }
+            if existing {
+                emit(&app, "booting", "检测到已有云端机器，正在检查并继续部署…", 15, None, "info");
+                run_script_stream(&app, "resume", None, Some(shared.clone()))?;
             } else {
                 let id = offer_id.as_deref().filter(|value| !value.is_empty())
                     .ok_or("请先查询报价并选择一台显卡。")?;
                 let limit = max_price.ok_or("缺少所选报价的价格保护值，请刷新报价后再试。")?;
                 validate_max_price(limit)?;
+                if shared.cancelling.load(Ordering::SeqCst) { return Ok(()); }
                 emit(&app, "creating", format!("正在核对所选显卡与 ${limit:.2}/小时价格上限…"), 3, None, "info");
-                run_script_stream(&app, "start", Some((id, limit)))?;
+                run_script_stream(&app, "start", Some((id, limit)), Some(shared.clone()))?;
             }
+            if shared.cancelling.load(Ordering::SeqCst) { return Ok(()); }
             connect_tunnel(&app, &shared)?;
+            if shared.cancelling.load(Ordering::SeqCst) { return Ok(()); }
             emit(&app, "local", "正在确认本地 ComfyUI 已就绪…", 95, None, "info");
+            while !local_worker.is_finished() {
+                if shared.cancelling.load(Ordering::SeqCst) { return Ok(()); }
+                thread::sleep(Duration::from_millis(200));
+            }
             local_worker.join().map_err(|_| "本地 ComfyUI 启动任务异常终止")??;
+            if shared.cancelling.load(Ordering::SeqCst) { return Ok(()); }
             emit(&app, "ready", "云端已连接，ComfyUI 可以使用了。", 100, None, "success");
             Ok(())
         })();
-        if let Err(error) = result { emit(&app, "error", error, 0, None, "error"); }
+        shared.launching.store(false, Ordering::SeqCst);
+        if !shared.cancelling.load(Ordering::SeqCst) {
+            if let Err(error) = result { emit(&app, "error", error, 0, None, "error"); }
+            shared.busy.store(false, Ordering::SeqCst);
+            let _ = app.emit("deployment-finished", ());
+        }
+    });
+    Ok(())
+}
+
+fn interrupt_launch(app: AppHandle, shared: Arc<Controller>, delete_after: bool) -> Result<(), String> {
+    if !shared.launching.load(Ordering::SeqCst) {
+        return Err("没有正在进行的机器部署。".into());
+    }
+    shared.cancelling.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| "正在取消部署，请稍候。".to_string())?;
+    thread::spawn(move || {
+        let phase = if delete_after { "deleting" } else { "cancelling" };
+        emit(&app, phase, "正在等待机器创建请求结束，然后停止部署…", 10, None, "info");
+        while shared.launching.load(Ordering::SeqCst) {
+            if matches!(cloud_exists(), Ok(true)) { break; }
+            thread::sleep(Duration::from_millis(500));
+        }
+        let stopped = if delete_after {
+            emit(&app, "deleting", "正在删除云端机器及临时磁盘…", 45, None, "info");
+            run_script_stream(&app, "stop", None, None)
+        } else {
+            emit(&app, "cancelling", "正在停止安装、下载和连接；云端机器将保留。", 60, None, "info");
+            Ok(())
+        };
+        let mut signalled_pid = shared.launch_pid.load(Ordering::SeqCst);
+        if signalled_pid != 0 {
+            // Keep the paid instance on cancellation; terminate only the local
+            // deployment process group and its SSH/downloader descendants.
+            let _ = Command::new("/bin/kill").arg("-TERM").arg(format!("-{signalled_pid}")).status();
+        }
+        if let Ok(mut tunnel) = shared.tunnel.lock() {
+            if let Some(mut child) = tunnel.take() { let _ = child.kill(); let _ = child.wait(); }
+        }
+        let waiting_since = Instant::now();
+        let mut reported_wait = false;
+        let mut forced_exit = false;
+        while shared.launching.load(Ordering::SeqCst) {
+            let pid = shared.launch_pid.load(Ordering::SeqCst);
+            if pid != 0 && pid != signalled_pid {
+                let _ = Command::new("/bin/kill").arg("-TERM").arg(format!("-{pid}")).status();
+                signalled_pid = pid;
+            }
+            if !reported_wait && waiting_since.elapsed() >= Duration::from_secs(10) {
+                emit(&app, phase, "正在等待部署进程退出；机器状态不会因此改变。", 75, None, "info");
+                reported_wait = true;
+            }
+            if !forced_exit && waiting_since.elapsed() >= Duration::from_secs(20) {
+                let pid = shared.launch_pid.load(Ordering::SeqCst);
+                if pid != 0 {
+                    let _ = Command::new("/bin/kill").arg("-KILL").arg(format!("-{pid}")).status();
+                }
+                forced_exit = true;
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+        let result = if !delete_after {
+            stopped
+        } else {
+            match cloud_exists() {
+                Ok(false) => Ok(()),
+                Ok(true) => Err(stopped.err().unwrap_or_else(|| "机器仍在运行，请重试删除。".into())),
+                Err(error) => Err(format!("无法确认机器是否已删除：{error}")),
+            }
+        };
+        match result {
+            Ok(()) => {
+                if delete_after {
+                    emit(&app, "deleted", "部署已取消，云端机器及临时磁盘已删除。", 100, None, "success");
+                } else {
+                    emit(&app, "cancelled", "部署已取消，云端机器仍在计费。可继续部署或单独删除机器。", 100, None, "success");
+                }
+            }
+            Err(error) => emit(&app, "error", error, 0, None, "error"),
+        }
+        shared.cancelling.store(false, Ordering::SeqCst);
         shared.busy.store(false, Ordering::SeqCst);
         let _ = app.emit("deployment-finished", ());
     });
@@ -614,12 +730,20 @@ fn launch(app: AppHandle, controller: State<'_, Arc<Controller>>,
 }
 
 #[tauri::command]
+fn cancel_launch(app: AppHandle, controller: State<'_, Arc<Controller>>) -> Result<(), String> {
+    interrupt_launch(app, controller.inner().clone(), false)
+}
+
+#[tauri::command]
 fn delete_cloud(app: AppHandle, controller: State<'_, Arc<Controller>>) -> Result<(), String> {
+    if controller.launching.load(Ordering::SeqCst) {
+        return interrupt_launch(app, controller.inner().clone(), true);
+    }
     begin(&controller)?;
     let shared = controller.inner().clone();
     thread::spawn(move || {
         emit(&app, "deleting", "正在删除云端机器及临时磁盘…", 10, None, "info");
-        let result = run_script_stream(&app, "stop", None);
+        let result = run_script_stream(&app, "stop", None, None);
         match result {
             Ok(()) => {
                 if let Ok(mut tunnel) = shared.tunnel.lock() {
@@ -664,7 +788,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![get_status, get_settings, save_settings,
             save_api_key, inspect_hf_model, save_model_pack, prepare_ref2va, prepare_fl2va, get_local_comfy_status,
             check_local_comfy_update, manage_local_comfy, stop_local_comfy, get_gpu_offers, get_host_metrics,
-            launch, delete_cloud, open_comfy_window])
+            launch, cancel_launch, delete_cloud, open_comfy_window])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.app_handle().state::<Arc<Controller>>();

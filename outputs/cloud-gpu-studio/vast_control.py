@@ -214,13 +214,52 @@ def start():
         raise
 
 
+def resume():
+    current = instance()
+    if not current:
+        raise RuntimeError('No tracked Vast.ai machine is available to resume.')
+    print('Checking existing Vast.ai machine before continuing deployment...', flush=True)
+    for _ in range(90):
+        current = instance()
+        info = ssh_info(current) if current else None
+        if info and subprocess.run(ssh_command(info, 'true'), capture_output=True, timeout=25).returncode == 0:
+            break
+        time.sleep(10)
+    else:
+        raise RuntimeError('The existing Vast.ai machine did not become reachable by SSH.')
+    s = state()
+    s['metrics_ssh'] = info
+    save_state(s)
+    print('GPU_SSH_READY', flush=True)
+    health = subprocess.run(ssh_command(info, 'curl -fsS --max-time 3 http://127.0.0.1:8188/system_stats'),
+                            capture_output=True, timeout=25)
+    if health.returncode == 0:
+        print('CLOUD_READY', flush=True)
+        return
+    selected_manifest = manifest()
+    subprocess.run(ssh_command(info, 'mkdir -p /workspace/bootstrap'), check=True)
+    subprocess.run(['scp', *info['options'], '-P', info['port'],
+                    str(DEPLOYABLE / 'setup_remote.sh'), str(DEPLOYABLE / 'download_models.py'),
+                    info['host'] + ':/workspace/bootstrap/'], check=True)
+    subprocess.run(['scp', *info['options'], '-P', info['port'], str(selected_manifest),
+                    info['host'] + ':/workspace/bootstrap/models.lock.json'], check=True)
+    print('Continuing installation and model download on the existing machine...', flush=True)
+    subprocess.run(ssh_command(info, 'bash /workspace/bootstrap/setup_remote.sh'), check=True, timeout=9000)
+    print('CLOUD_READY', flush=True)
+
+
 def stop():
     instance_id = state().get('id')
     if not instance_id:
         print('No tracked Vast.ai instance.', flush=True)
         return
     if instance():
-        request('instances/' + str(instance_id) + '/', method='DELETE')
+        try:
+            request('instances/' + str(instance_id) + '/', method='DELETE')
+        except RuntimeError as error:
+            # The deployment worker may also be cleaning up the same instance.
+            if 'HTTP 404' not in str(error):
+                raise
     for _ in range(24):
         if not instance():
             save_state({})
@@ -272,4 +311,4 @@ if __name__ == '__main__':
     elif command == 'offers':
         print(json.dumps(list_offers()))
     else:
-        {'start': start, 'stop': stop, 'connect': connect, 'guard': guard}[command]()
+        {'start': start, 'resume': resume, 'stop': stop, 'connect': connect, 'guard': guard}[command]()
