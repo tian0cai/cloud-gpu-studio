@@ -1,0 +1,16 @@
+node_modules
+dist/
+src-tauri/target/
+src-tauri/gen/
+work/
+*.app/
+*.log
+outputs/cloud-gpu-studio/*-smoke.png
+outputs/cloud-gpu-studio/*-smoke.mp4
+__pycache__/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.pem
+*.key

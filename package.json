@@ -1,0 +1,26 @@
+{
+  "name": "cloud-gpu-studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1420",
+    "build": "tsc --noEmit && vite build",
+    "tauri": "tauri",
+    "version:set": "node scripts/set-version.mjs",
+    "release:check": "node scripts/check-release.mjs",
+    "release:build": "bash scripts/build-release.sh",
+    "release:publish": "bash scripts/publish-release.sh"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-process": "^2.4.0",
+    "@tauri-apps/plugin-updater": "^2.14.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.3",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0"
+  },
+  "license": "GPL-3.0-or-later"
+}

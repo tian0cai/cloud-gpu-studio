@@ -1,0 +1,69 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Cloud GPU Studio",
+  "version": "0.1.0",
+  "identifier": "app.cloudgpustudio.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Cloud GPU Studio",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 940,
+        "minHeight": 620
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: http://127.0.0.1:8188; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:8188; frame-src http://127.0.0.1:8188"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app"
+    ],
+    "category": "Productivity",
+    "shortDescription": "Manage disposable cloud GPUs for local ComfyUI",
+    "resources": {
+      "../LICENSE": "LICENSE",
+      "../THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md",
+      "../outputs/cloud-gpu-studio/app_config.py": "outputs/cloud-gpu-studio/app_config.py",
+      "../outputs/cloud-gpu-studio/cloud_control.py": "outputs/cloud-gpu-studio/cloud_control.py",
+      "../outputs/cloud-gpu-studio/comfy_local.py": "outputs/cloud-gpu-studio/comfy_local.py",
+      "../outputs/cloud-gpu-studio/comfyui_cloud_bridge/__init__.py": "outputs/cloud-gpu-studio/comfyui_cloud_bridge/__init__.py",
+      "../outputs/cloud-gpu-studio/download_models.py": "outputs/cloud-gpu-studio/download_models.py",
+      "../outputs/cloud-gpu-studio/h3-local.workflow.json": "outputs/cloud-gpu-studio/h3-local.workflow.json",
+      "../outputs/cloud-gpu-studio/host_metrics.py": "outputs/cloud-gpu-studio/host_metrics.py",
+      "../outputs/cloud-gpu-studio/models.lock.json": "outputs/cloud-gpu-studio/models.lock.json",
+      "../outputs/cloud-gpu-studio/qwen-local.workflow.json": "outputs/cloud-gpu-studio/qwen-local.workflow.json",
+      "../outputs/cloud-gpu-studio/ref2va.lock.json": "outputs/cloud-gpu-studio/ref2va.lock.json",
+      "../outputs/cloud-gpu-studio/runpod_api.py": "outputs/cloud-gpu-studio/runpod_api.py",
+      "../outputs/cloud-gpu-studio/runpod_control.py": "outputs/cloud-gpu-studio/runpod_control.py",
+      "../outputs/cloud-gpu-studio/setup_remote.sh": "outputs/cloud-gpu-studio/setup_remote.sh",
+      "../outputs/cloud-gpu-studio/vast_control.py": "outputs/cloud-gpu-studio/vast_control.py",
+      "../outputs/cloud-gpu-studio/workflows/H3-单图首帧-FL2VA.json": "outputs/cloud-gpu-studio/workflows/H3-单图首帧-FL2VA.json",
+      "../outputs/cloud-gpu-studio/workflows/H3-双图参考-Ref2VA.json": "outputs/cloud-gpu-studio/workflows/H3-双图参考-Ref2VA.json",
+      "../outputs/cloud-gpu-studio/comfyui_cloud_bridge/LICENSE": "outputs/cloud-gpu-studio/comfyui_cloud_bridge/LICENSE",
+      "../COPYRIGHT.md": "COPYRIGHT.md"
+    },
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.icns"
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU2QUM5NTAxQjA2QTEyREEKUldUYUVtcXdBWldzNXQ0N1duMDdZYlRXN05yeTJKUTFtN0YzM3FkNXNTWkJCcm1FcWRvRlZOd2oK",
+      "endpoints": [
+        "https://github.com/tian0cai/cloud-gpu-studio/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

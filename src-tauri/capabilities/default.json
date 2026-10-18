@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Desktop controller window",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:event:default", "updater:default", "process:allow-restart"]
+}
