@@ -1,6 +1,10 @@
+<img src="public/brand-mark.svg" alt="Cloud GPU Studio logo" width="80">
+
 # Cloud GPU Studio
 
 [简体中文](README.zh-CN.md) · English
+
+![Home screen preview](docs/images/home-en.jpg)
 
 Cloud GPU Studio is a desktop controller for a local ComfyUI and disposable cloud GPUs. It currently supports RunPod and Vast.ai. The app lets users select a GPU offer and hourly price limit, prepares a remote ComfyUI, downloads a selected model preset, opens an SSH tunnel, and connects a local ComfyUI window. Cloud machines and their temporary storage can be deleted from the app; generated files remain local.
 

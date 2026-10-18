@@ -1,6 +1,10 @@
+<img src="public/brand-mark.svg" alt="Cloud GPU Studio logo" width="80">
+
 # Cloud GPU Studio
 
 [English](README.md) · 简体中文
+
+![首页界面预览](docs/images/home-zh.jpg)
 
 Cloud GPU Studio 是连接本地 ComfyUI 与临时云端 GPU 的桌面应用。目前支持 RunPod 和 Vast.ai。你可以分别配置两个平台的 API Key，选择图片及视频模型，查询实时显卡报价，启动或删除机器，并在本地 ComfyUI 编辑和运行工作流。界面语言可在左侧栏切换中文或英文。
 
