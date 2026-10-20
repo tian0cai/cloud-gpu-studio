@@ -12,6 +12,16 @@ import vast_control
 
 
 class GpuOfferTests(unittest.TestCase):
+    def test_vast_quote_includes_storage_for_requested_disk(self):
+        offer = {'gpu_name': 'A800 PCIE', 'num_gpus': 1, 'gpu_ram': 81920, 'compute_cap': 800,
+                 'disk_space': 200, 'direct_port_count': 1, 'reliability2': 0.98,
+                 'dph_total': 0.80, 'storage_cost': 0.40, 'id': 1}
+        expected = 0.80 + 0.40 * (vast_control.DISK_GB - vast_control.DEFAULT_DISK_GB) / 30 / 24
+        self.assertAlmostEqual(vast_control.estimated_hourly(offer), expected)
+        with patch.object(vast_control, 'request', return_value={'offers': [offer]}):
+            self.assertEqual(vast_control.eligible_offers(0.80), [])
+            self.assertEqual([item['id'] for item in vast_control.eligible_offers(1.00)], [1])
+
     def test_vast_includes_a800_but_obeys_price_and_host_requirements(self):
         base = {'gpu_name': 'A800 PCIE', 'num_gpus': 1, 'gpu_ram': 81920, 'compute_cap': 800,
                 'disk_space': 200, 'direct_port_count': 1, 'reliability2': 0.98,
@@ -62,6 +72,38 @@ class GpuOfferTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, '刷新报价'):
                 vast_control.start()
             request.assert_not_called()
+
+    def test_vast_retries_disappeared_offer_only_with_same_gpu_under_price_cap(self):
+        chosen = {'id': 10, 'gpu_name': 'B200', 'dph_total': 6.0}
+        alternate = {'id': 11, 'gpu_name': 'B200', 'dph_total': 6.1}
+        other_gpu = {'id': 12, 'gpu_name': 'B300', 'dph_total': 5.0}
+        with patch.object(vast_control, 'request', side_effect=[
+                RuntimeError('Vast.ai HTTP 400: no_such_ask'), {'new_contract': 42}]) as request, \
+             patch.object(vast_control, 'eligible_offers', return_value=[other_gpu, alternate]) as eligible:
+            created, used = vast_control.create_with_same_gpu_retry(chosen, 6.2)
+        self.assertEqual(created['new_contract'], 42)
+        self.assertEqual(used['id'], 11)
+        eligible.assert_called_once_with(6.2)
+        self.assertEqual([call.args[0] for call in request.call_args_list], ['asks/10/', 'asks/11/'])
+
+    def test_vast_does_not_retry_ambiguous_create_error(self):
+        chosen = {'id': 10, 'gpu_name': 'B200', 'dph_total': 6.0}
+        with patch.object(vast_control, 'request', side_effect=RuntimeError('curl timeout')) as request, \
+             patch.object(vast_control, 'eligible_offers') as eligible:
+            with self.assertRaisesRegex(RuntimeError, 'curl timeout'):
+                vast_control.create_with_same_gpu_retry(chosen, 6.2)
+        request.assert_called_once()
+        eligible.assert_not_called()
+
+    def test_vast_disappeared_offer_without_same_gpu_stops_cleanly(self):
+        chosen = {'id': 10, 'gpu_name': 'B300', 'dph_total': 7.0}
+        with patch.object(vast_control, 'request', side_effect=RuntimeError('no_such_ask')) as request, \
+             patch.object(vast_control, 'eligible_offers', return_value=[
+                 {'id': 12, 'gpu_name': 'B200', 'dph_total': 6.0}]) as eligible:
+            with self.assertRaisesRegex(RuntimeError, '请刷新报价后重试'):
+                vast_control.create_with_same_gpu_retry(chosen, 7.0)
+        request.assert_called_once()
+        eligible.assert_called_once_with(7.0)
 
 
 if __name__ == '__main__':

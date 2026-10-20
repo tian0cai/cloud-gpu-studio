@@ -12,7 +12,7 @@ WORK = Path(os.environ.get('CLOUD_GPU_STUDIO_WORK_DIR', BASE / 'work'))
 SETTINGS = WORK / 'app-settings.json'
 SECRETS = WORK / 'secrets'
 DEFAULT = {'provider': 'runpod', 'image_model': 'qwen', 'video_model': 'h3',
-           'video_mode': 'ref2va', 'custom_model': None}
+           'video_mode': 'ref2va', 'h3_attention': 'standard', 'custom_model': None}
 KEY_FILES = {'runpod': 'runpod_api_key', 'vast': 'vast_api_key'}
 MODEL_OVERRIDES = WORK / 'model-overrides.json'
 REF2VA_READY = WORK / 'ref2va-ready.json'
@@ -152,6 +152,8 @@ def write(value):
         raise ValueError('Unsupported video model.')
     if value.get('video_mode', DEFAULT['video_mode']) not in ('fl2va', 'ref2va'):
         raise ValueError('Unsupported H3 video mode.')
+    if value.get('h3_attention', DEFAULT['h3_attention']) not in ('standard', 'sol-attn'):
+        raise ValueError('Unsupported H3 attention mode.')
     if value.get('video_mode') == 'ref2va' and (WORK / 'active-provider.json').exists() and not ref2va_ready():
         raise ValueError('Download and verify the Ref2VA model on this machine before switching.')
     if value.get('video_mode') == 'fl2va' and (WORK / 'active-provider.json').exists() and not fl2va_ready():

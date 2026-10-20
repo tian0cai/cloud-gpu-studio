@@ -120,6 +120,17 @@ def h3_graph(prompt, seed, steps, width, height, frames, uploaded=None, lora_str
                            lora_name=files['lora'], strength_model=lora_strength)
         graph['7']['inputs']['model'] = ['16', 0]
         graph['9']['inputs']['model'] = ['16', 0]
+    settings_path = OVERRIDES.parent / 'app-settings.json'
+    settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+    if settings.get('h3_attention') == 'sol-attn':
+        model = graph['7']['inputs']['model']
+        graph['17'] = node('BlockSparseAttention', model=model,
+                           selection='sol-attn', **{'selection.tau': 1.3},
+                           start_percent=0.2, end_percent=1.0, dense_blocks='',
+                           min_tokens=12288, extra_tokens=256,
+                           sink_conditioning='exact_kv_and_rows', verbose=True)
+        graph['7']['inputs']['model'] = ['17', 0]
+        graph['9']['inputs']['model'] = ['17', 0]
     return graph
 
 
@@ -134,8 +145,9 @@ def h3_reference_graph(prompt, seed, steps, width, height, frames, uploaded):
     conditioning['class_type'] = 'MiniMaxH3ReferenceToVideo'
     conditioning['inputs']['audio_vae'] = ['4', 0]
     conditioning['inputs']['ref_image_size'] = 'match'
+    # Keep reference image IDs away from the optional LoRA and attention nodes.
     for index, filename in enumerate(uploaded):
-        key = str(15 + index)
+        key = str(20 + index)
         graph[key] = node('LoadImage', image=filename)
         conditioning['inputs'][f'ref_images.ref_image_{index}'] = [key, 0]
     graph['14']['inputs']['filename_prefix'] = 'cloud-gpu-studio/h3-ref2va'

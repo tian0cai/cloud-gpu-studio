@@ -88,6 +88,8 @@ class ModelPlanTests(unittest.TestCase):
         self.assertEqual(len(files), 7)
         self.assertEqual([f['preset'] for f in files].count('h3-ref2va'), 1)
         self.assertEqual(files[0]['size'], 20970379616)
+        self.assertEqual(files[0]['destination'],
+                         'diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors')
         self.assertFalse(any('fl2va' in f['destination'] for f in files))
         self.assertEqual([f['preset'] for f in files[1:4]], ['h3'] * 3)
 

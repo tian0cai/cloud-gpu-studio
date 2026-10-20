@@ -36,6 +36,33 @@ kill "$heartbeat_pid" 2>/dev/null || true
 wait "$heartbeat_pid" 2>/dev/null || true
 echo 'PYTHON_DEPENDENCIES_READY'
 
+gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)
+driver_major=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 | cut -d. -f1)
+if [[ "$gpu_name" =~ (H200|B200|B300) ]]; then
+  if [ "$driver_major" -ge 580 ]; then
+    torch_cuda=$(/workspace/comfy-env/bin/python -c 'import torch; print(torch.version.cuda or "")')
+    if [[ "$torch_cuda" != 13.* ]]; then
+      echo "Installing CUDA 13 PyTorch for $gpu_name; model download continues in parallel..."
+      /workspace/comfy-env/bin/python -m pip install --no-cache-dir --upgrade \
+        torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 \
+        --index-url https://download.pytorch.org/whl/cu130 > /workspace/logs/cu130-install.log 2>&1 &
+      cuda_pid=$!
+      while kill -0 "$cuda_pid" 2>/dev/null; do
+        echo "Installing CUDA 13 PyTorch... $(tail -n 1 /workspace/logs/cu130-install.log 2>/dev/null | cut -c1-160)"
+        sleep 20
+      done
+      if ! wait "$cuda_pid"; then
+        tail -80 /workspace/logs/cu130-install.log
+        exit 1
+      fi
+    fi
+    /workspace/comfy-env/bin/python -c 'import torch, comfy_kitchen as ck; assert torch.version.cuda.startswith("13."); assert ck.sol_attn_is_available(torch.device("cuda:0"))'
+    echo 'CUDA13_ATTENTION_READY'
+  else
+    echo "$gpu_name driver $driver_major is below 580; Sol-Attn will use dense fallback."
+  fi
+fi
+
 echo 'Waiting for model download and checksum verification...'
 wait "$download_pid"
 trap - EXIT

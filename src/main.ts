@@ -21,7 +21,7 @@ type ModelFile = { repo: string; revision: string; filename: string; destination
 type ImageModel = 'qwen' | 'local-qwen' | 'checkpoint' | 'none';
 type VideoModel = 'h3' | 'local-h3' | 'none';
 type LocalPack = { ready: true; image: Record<string, string>; video: Record<string, string>; urls: Record<'qwen' | 'h3', Record<string, string>>; size_gb: number } | { ready: false; error: string };
-type Settings = { provider: 'runpod' | 'vast'; image_model: ImageModel; video_model: VideoModel; video_mode: 'fl2va' | 'ref2va'; ref2va_ready: boolean; fl2va_ready: boolean; custom_model: ModelFile | null; local_models_available: boolean; local_pack: LocalPack; keys: Record<'runpod' | 'vast', boolean> };
+type Settings = { provider: 'runpod' | 'vast'; image_model: ImageModel; video_model: VideoModel; video_mode: 'fl2va' | 'ref2va'; h3_attention: 'standard' | 'sol-attn'; ref2va_ready: boolean; fl2va_ready: boolean; custom_model: ModelFile | null; local_models_available: boolean; local_pack: LocalPack; keys: Record<'runpod' | 'vast', boolean> };
 type Progress = {
   phase: string;
   message: string;
@@ -32,6 +32,7 @@ type Progress = {
 type LocalComfy = { path: string; installed: boolean; python_ready: boolean; bridge_ready: boolean; git_ready: boolean; version: string | null; update_available: boolean | null; error: string | null };
 type GpuOffer = { id: string; gpu: string; price: number; location: string; vramGb: number; reliability: number | null };
 type HostMetrics = { online: boolean; message?: string; cpuPercent?: number | null; gpuPercent?: number | null; ramUsedGb?: number | null; ramTotalGb?: number | null; vramUsedGb?: number | null; vramTotalGb?: number | null };
+type IdleGuard = { enabled: boolean; phase: 'off' | 'waiting' | 'idle' | 'warning'; secondsRemaining: number | null };
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
@@ -58,19 +59,19 @@ app.innerHTML = `
             <div class="pack-editor"><div><strong>图片 · Qwen 架构</strong><label>主模型<input data-pack-kind="qwen" data-pack-role="unet" type="url" placeholder="Hugging Face 文件链接"></label><label>文本编码器<input data-pack-kind="qwen" data-pack-role="clip" type="url" placeholder="Hugging Face 文件链接"></label><label>VAE<input data-pack-kind="qwen" data-pack-role="vae" type="url" placeholder="Hugging Face 文件链接"></label></div>
             <div><strong>视频 · H3 FL2VA 架构</strong><label>主模型<input data-pack-kind="h3" data-pack-role="unet" type="url" placeholder="Hugging Face 文件链接"></label><label>文本编码器<input data-pack-kind="h3" data-pack-role="clip" type="url" placeholder="Hugging Face 文件链接"></label><label>视频 VAE<input data-pack-kind="h3" data-pack-role="video_vae" type="url" placeholder="Hugging Face 文件链接"></label><label>音频 VAE<input data-pack-kind="h3" data-pack-role="audio_vae" type="url" placeholder="Hugging Face 文件链接"></label><label>LoRA（可选）<input data-pack-kind="h3" data-pack-role="lora" type="url" placeholder="可留空"></label></div></div>
             <div class="pack-actions"><button id="save-pack" type="button">检查并保存组件包</button><span id="pack-status">每个链接会锁定版本、大小与 SHA-256；只支持上述两种节点架构。</span></div><p>组件包保存在本机受限目录，不会写入公共仓库。多参考模式使用独立的 Ref2VA 主模型；现有 H3 文本编码器和 VAE 会复用，LoRA 需另行验证适配。</p></details>
-          <div class="provider-row"><label>云平台<select id="provider"><option value="runpod">RunPod</option><option value="vast">Vast.ai</option></select></label></div>
-          <div class="config-actions"><button id="save-config" type="button">保存模型与平台</button><span id="config-message">选择会在下一次新建机器时生效。</span></div>
-          <div class="mode-panel"><div><strong>H3 视频模式</strong><small id="mode-state">多参考 Ref2VA 已启用</small></div><div class="mode-actions"><button id="download-ref2va" type="button">下载多参考模型</button><button id="switch-ref2va" type="button">切换到多参考</button><button id="download-fl2va" type="button">下载首帧模型</button><button id="switch-fl2va" type="button">切回首帧模式</button></div><small id="mode-progress">新机器优先下载 Ref2VA；首帧 FL2VA 可在机器启动后按需下载。</small></div>
+          <div class="config-actions"><button id="save-config" type="button">保存模型方案</button><span id="config-message">选择会在下一次新建机器时生效。</span></div>
+          <div class="mode-panel"><div><strong>H3 视频模式</strong><small id="mode-state">多参考 Ref2VA 已启用</small></div><div class="mode-actions"><button id="download-ref2va" type="button">下载多参考模型</button><button id="switch-ref2va" type="button">切换到多参考</button><button id="download-fl2va" type="button">下载首帧模型</button><button id="switch-fl2va" type="button">切回首帧模式</button></div><small id="mode-progress">新机器优先下载 Ref2VA；首帧 FL2VA 可在机器启动后按需下载。</small><div class="attention-actions"><label>H3 注意力加速<select id="h3-attention"><option value="standard">标准（画质优先）</option><option value="sol-attn">Sol-Attn（实验）</option></select></label><button id="save-h3-attention" type="button">应用到下一次生成</button><small id="attention-status">不会改变现有工作流；Sol-Attn 需要云端 CUDA 算子支持。</small></div></div>
           <p class="config-footnote">新建机器预留双模式磁盘：RunPod 180 GB、Vast.ai 200 GB；磁盘费用由平台计入报价或另行计费。兼容的 80 GB 以上单卡，按需实例；Vast.ai 累计费用达到 $9 自动删除，RunPod 保留原 3 小时限制。报价筛选可留空。</p>
         </div>
         <div class="offer-card"><div class="section-head"><div><div class="eyebrow">LIVE GPU MARKET</div><h3>选择显卡与价格</h3></div><span id="offer-count" class="offer-count">尚未查询</span></div>
+          <div class="provider-row"><label>云平台<select id="provider"><option value="runpod">RunPod</option><option value="vast">Vast.ai</option></select></label><small id="provider-message" role="status">切换平台后自动保存，再查询该平台报价。</small></div>
           <div class="offer-controls"><label>每小时价格筛选（美元，可留空）<input id="max-price" type="number" min="0.001" step="0.001" placeholder="不限"></label><label>显卡型号<select id="gpu-filter"><option value="">全部兼容型号</option></select></label><button id="query-offers" type="button">查询实时报价</button></div>
-          <p id="offer-message" class="offer-message">保存模型与平台后查询报价，再选择一台机器；启动时会重新核对库存和价格。</p><div id="gpu-offers" class="offer-list"></div>
+          <p id="offer-message" class="offer-message">选择平台并保存模型方案后查询报价，再选择一台机器；启动时会重新核对库存和价格。</p><div id="gpu-offers" class="offer-list"></div>
         </div>
         <div class="hero">
           <div class="hero-copy"><div class="hero-kicker">INSTANCE CONTROL</div><h2>启动云端机器</h2><p>可先在 ComfyUI 页面编辑工作流，再按模型方案启动云端 GPU。</p>
-          <div class="actions"><button id="launch" class="primary">启动并连接 <span>↗</span></button><button id="open-comfy" class="open-comfy" disabled>打开 ComfyUI ↗</button><button id="stop-comfy" type="button" disabled title="停止本地 ComfyUI 进程（127.0.0.1:8188）">关闭 ComfyUI</button><button id="cancel-launch" type="button" hidden>取消部署</button><button id="delete" class="danger" disabled>删除云端机器</button></div>
-          <div class="hero-note">取消部署会保留仍在计费的机器；只有点击“删除云端机器”才会释放它。关闭应用也不会自动删除机器。</div></div>
+          <div class="actions"><button id="launch" class="primary">启动并连接 <span>↗</span></button><button id="open-comfy" class="open-comfy" disabled>打开 ComfyUI ↗</button><button id="stop-comfy" type="button" disabled title="停止本地 ComfyUI 进程（127.0.0.1:8188）">关闭 ComfyUI</button><button id="cancel-launch" type="button" hidden>取消部署</button><button id="idle-guard-toggle" type="button" aria-pressed="false" title="应用运行期间，本地与云端队列空闲 5 分钟后弹出 15 秒倒计时；状态不明时不会自动删除。" disabled>空闲自动删：关</button><button id="delete" class="danger" disabled>删除云端机器</button></div>
+          <div class="hero-note">取消部署会保留机器；开启自动删除后，双端队列空闲 5 分钟会弹出 15 秒倒计时。关闭应用不会自动删除。</div></div>
         </div>
         <div class="metrics"><div class="metric"><span>云端机器</span><strong id="pod-value">检查中</strong><small id="pod-detail">云端实例</small></div><div class="metric"><span>运行价格</span><strong id="price-value">—</strong><small>美元 / 小时</small></div><div class="metric"><span>账户余额</span><strong id="balance-value">—</strong><small>美元</small></div><div class="metric"><span>连接状态</span><strong id="connection-value">检查中</strong><small id="connection-detail">本地端口 8188 / 8189</small></div></div>
         <div class="telemetry"><div class="section-head"><div><div class="eyebrow">LIVE TELEMETRY</div><h3>远程资源使用情况</h3></div><span id="telemetry-status">云端未启动</span></div><div class="telemetry-grid">
@@ -228,6 +229,7 @@ let latestStatus: Status | null = null;
 let savedSettings: Settings | null = null;
 let inspectedModel: ModelFile | null = null;
 let configDirty = false;
+let providerSaving = false;
 let operating = false;
 let currentPhase = '';
 let lastError = '';
@@ -250,6 +252,29 @@ let offerQueryRevision = 0;
 let metricsPolling = false;
 let metricsPodId: string | null = null;
 const metricsHistory: Record<string, number[]> = { cpu: [], gpu: [], ram: [], vram: [] };
+let idleGuard: IdleGuard | null = null;
+
+function renderIdleGuard() {
+  if (!idleGuard) return;
+  const button = el<HTMLButtonElement>('idle-guard-toggle');
+  button.disabled = false;
+  button.classList.toggle('is-on', idleGuard.enabled);
+  button.setAttribute('aria-pressed', String(idleGuard.enabled));
+  button.textContent = idleGuard.enabled ? '空闲自动删：开' : '空闲自动删：关';
+  const text = idleGuard.phase === 'off' ? '已关闭；机器不会因空闲自动删除。'
+    : idleGuard.phase === 'waiting' ? '监控已启用，等待机器连接及队列状态确认。'
+    : idleGuard.phase === 'idle' ? `队列已空闲，约 ${idleGuard.secondsRemaining ?? 0} 秒后弹出删除倒计时。`
+    : `删除倒计时：${idleGuard.secondsRemaining ?? 0} 秒。可在弹窗中保留机器。`;
+  button.title = text;
+}
+
+el<HTMLButtonElement>('idle-guard-toggle').addEventListener('click', async event => {
+  const button = event.currentTarget as HTMLButtonElement;
+  button.disabled = true;
+  try { idleGuard = await invoke<IdleGuard>('set_idle_guard', { enabled: !idleGuard?.enabled }); renderIdleGuard(); }
+  catch (error) { appendLog(`空闲自动删除设置失败：${String(error)}`, 'error'); renderIdleGuard(); }
+  finally { button.disabled = false; }
+});
 
 const startSteps = ['创建机器', '启动 GPU', '安装与下载', '校验与启动', '连接隧道', '本地界面'];
 const deleteSteps = ['提交删除', '释放云端资源', '确认完成'];
@@ -331,19 +356,19 @@ function setProgress(progress: Progress) {
 }
 
 function updateControls() {
-  launch.disabled = operating || Boolean(latestStatus?.busy) || !savedSettings?.keys[savedSettings.provider] || configDirty || (!latestStatus?.podId && !selectedOffer);
+  launch.disabled = operating || providerSaving || Boolean(latestStatus?.busy) || !savedSettings?.keys[savedSettings.provider] || configDirty || (!latestStatus?.podId && !selectedOffer);
   const canInterruptLaunch = (!operating && Boolean(latestStatus?.launching)) || (operating && progressMode === 'start');
   cancelButton.hidden = !canInterruptLaunch;
   cancelButton.disabled = !canInterruptLaunch;
   remove.disabled = canInterruptLaunch ? false : operating || Boolean(latestStatus?.busy) || !latestStatus?.podId;
   launch.innerHTML = latestStatus?.podId ? '连接已有机器 <span>↗</span>' : '启动并连接 <span>↗</span>';
   const locked = operating || Boolean(latestStatus?.busy) || Boolean(latestStatus?.podId);
-  el<HTMLButtonElement>('query-offers').disabled = locked || queryingOffers || configDirty || !savedSettings?.keys[savedSettings.provider];
+  el<HTMLButtonElement>('query-offers').disabled = locked || queryingOffers || providerSaving || configDirty || !savedSettings?.keys[savedSettings.provider];
   el<HTMLInputElement>('max-price').disabled = locked || queryingOffers;
   el<HTMLSelectElement>('gpu-filter').disabled = locked || queryingOffers || offers.length === 0;
   document.querySelectorAll<HTMLButtonElement>('.offer-option').forEach(button => { button.disabled = locked || queryingOffers; });
   for (const id of ['provider', 'image-model', 'video-model', 'model-url', 'inspect-model', 'save-config']) {
-    (el<HTMLInputElement | HTMLButtonElement | HTMLSelectElement>(id)).disabled = locked;
+    (el<HTMLInputElement | HTMLButtonElement | HTMLSelectElement>(id)).disabled = locked || providerSaving;
   }
   for (const provider of ['runpod', 'vast']) {
     el<HTMLInputElement>(`api-key-${provider}`).disabled = locked;
@@ -367,6 +392,8 @@ function updateControls() {
   el<HTMLButtonElement>('switch-ref2va').disabled = modeLocked || !savedSettings?.ref2va_ready || savedSettings?.video_mode === 'ref2va';
   el<HTMLButtonElement>('download-fl2va').disabled = modeLocked || !latestStatus?.podId || Boolean(savedSettings?.fl2va_ready);
   el<HTMLButtonElement>('switch-fl2va').disabled = modeLocked || !savedSettings?.fl2va_ready || savedSettings?.video_mode === 'fl2va';
+  el<HTMLSelectElement>('h3-attention').disabled = operating || Boolean(latestStatus?.busy) || savedSettings?.video_model === 'none';
+  el<HTMLButtonElement>('save-h3-attention').disabled = operating || Boolean(latestStatus?.busy) || savedSettings?.video_model === 'none';
 }
 
 function renderLocalComfyBadge() {
@@ -458,8 +485,12 @@ function renderSettings(settings: Settings) {
   savedSettings = settings;
   packDirty = false;
   providerSelect.value = settings.provider;
+  el<HTMLElement>('provider-message').textContent = settings.keys[settings.provider]
+    ? `当前平台：${settings.provider === 'vast' ? 'Vast.ai' : 'RunPod'}。切换后自动保存。`
+    : '当前平台尚未配置 API Key，请到账户设置保存。';
   imageSelect.value = settings.image_model;
   videoSelect.value = settings.video_model;
+  el<HTMLSelectElement>('h3-attention').value = settings.h3_attention;
   el<HTMLElement>('mode-state').textContent = settings.video_mode === 'ref2va'
     ? '多参考 Ref2VA 已启用' : '首帧 / 尾帧 FL2VA 已启用';
   if (!ref2vaBusy) el<HTMLElement>('mode-progress').textContent = settings.video_mode === 'ref2va'
@@ -764,7 +795,36 @@ el<HTMLButtonElement>('update-comfy').addEventListener('click', async () => {
   }
 });
 
-providerSelect.addEventListener('change', markDirty);
+providerSelect.addEventListener('change', async () => {
+  if (!savedSettings || providerSaving || providerSelect.value === savedSettings.provider) return;
+  const previous = savedSettings;
+  const nextProvider = providerSelect.value;
+  providerSaving = true;
+  clearOffers('正在切换平台，请稍候…');
+  el<HTMLElement>('provider-message').textContent = '正在保存云平台…';
+  updateControls();
+  try {
+    const settings = await invoke<Settings>('save_settings', { settings: {
+      provider: nextProvider, image_model: previous.image_model,
+      video_model: previous.video_model, video_mode: previous.video_mode,
+      h3_attention: previous.h3_attention, custom_model: previous.custom_model,
+    } });
+    savedSettings = settings;
+    providerSelect.value = settings.provider;
+    renderHome();
+    el<HTMLElement>('provider-message').textContent = settings.keys[settings.provider]
+      ? `已切换至 ${settings.provider === 'vast' ? 'Vast.ai' : 'RunPod'}，可以查询实时报价。`
+      : '已切换平台；请先到账户设置保存该平台 API Key。';
+    el<HTMLElement>('offer-message').textContent = configDirty ? '请先保存模型方案，再查询当前平台报价。' : '请选择价格条件并查询当前平台报价。';
+  } catch (error) {
+    providerSelect.value = previous.provider;
+    el<HTMLElement>('provider-message').textContent = `切换平台失败：${String(error)}`;
+    el<HTMLElement>('offer-message').textContent = '平台未切换，请检查云端机器状态或账户设置。';
+  } finally {
+    providerSaving = false;
+    updateControls();
+  }
+});
 imageSelect.addEventListener('change', markDirty);
 videoSelect.addEventListener('change', markDirty);
 document.querySelectorAll<HTMLInputElement>('[data-pack-kind]').forEach(input => input.addEventListener('input', () => {
@@ -801,8 +861,9 @@ el<HTMLButtonElement>('save-config').addEventListener('click', async () => {
     if (image_model === 'none' && video_model === 'none') throw new Error('至少选择一个模型。');
     if (image_model === 'checkpoint' && !inspectedModel) throw new Error('请先检查图片 checkpoint 文件。');
     const settings = await invoke<Settings>('save_settings', { settings: {
-      provider: providerSelect.value, image_model, video_model,
+      provider: savedSettings?.provider || providerSelect.value, image_model, video_model,
       video_mode: savedSettings?.video_mode || 'ref2va',
+      h3_attention: savedSettings?.h3_attention || 'standard',
       custom_model: image_model === 'checkpoint' ? inspectedModel : null,
     } });
     renderSettings(settings);
@@ -818,6 +879,7 @@ async function switchVideoMode(mode: 'fl2va' | 'ref2va') {
     const settings = await invoke<Settings>('save_settings', { settings: {
       provider: savedSettings.provider, image_model: savedSettings.image_model,
       video_model: savedSettings.video_model, video_mode: mode,
+      h3_attention: savedSettings.h3_attention,
       custom_model: savedSettings.custom_model,
     } });
     renderSettings(settings);
@@ -826,6 +888,25 @@ async function switchVideoMode(mode: 'fl2va' | 'ref2va') {
       : '已切回首帧 / 尾帧模式。';
   } catch (error) { el<HTMLElement>('mode-progress').textContent = `切换失败：${String(error)}`; }
 }
+
+el<HTMLButtonElement>('save-h3-attention').addEventListener('click', async () => {
+  if (!savedSettings) return;
+  const button = el<HTMLButtonElement>('save-h3-attention');
+  button.disabled = true;
+  try {
+    const settings = await invoke<Settings>('save_settings', { settings: {
+      provider: savedSettings.provider, image_model: savedSettings.image_model,
+      video_model: savedSettings.video_model, video_mode: savedSettings.video_mode,
+      h3_attention: el<HTMLSelectElement>('h3-attention').value,
+      custom_model: savedSettings.custom_model,
+    } });
+    renderSettings(settings);
+    el<HTMLElement>('attention-status').textContent = settings.h3_attention === 'sol-attn'
+      ? 'Sol-Attn 已启用；下一次 H3 任务生效。请比较速度和参考图一致性。'
+      : '标准注意力已启用；下一次 H3 任务生效。';
+  } catch (error) { el<HTMLElement>('attention-status').textContent = `切换失败：${String(error)}`; }
+  finally { updateControls(); }
+});
 
 el<HTMLButtonElement>('switch-ref2va').addEventListener('click', () => { void switchVideoMode('ref2va'); });
 el<HTMLButtonElement>('switch-fl2va').addEventListener('click', () => { void switchVideoMode('fl2va'); });
@@ -846,7 +927,7 @@ el<HTMLButtonElement>('save-pack').addEventListener('click', async () => {
   const button = el<HTMLButtonElement>('save-pack');
   button.disabled = true;
   el<HTMLElement>('pack-status').textContent = '正在核对 Hugging Face 文件信息，可能需要几十秒…';
-  const pending = { provider: providerSelect.value, image: imageSelect.value, video: videoSelect.value };
+  const pending = { image: imageSelect.value, video: videoSelect.value };
   const urls: Record<'qwen' | 'h3', Record<string, string>> = { qwen: {}, h3: {} };
   document.querySelectorAll<HTMLInputElement>('[data-pack-kind]').forEach(input => {
     urls[input.dataset.packKind as 'qwen' | 'h3'][input.dataset.packRole || ''] = input.value.trim();
@@ -854,10 +935,9 @@ el<HTMLButtonElement>('save-pack').addEventListener('click', async () => {
   try {
     const settings = await invoke<Settings>('save_model_pack', { urls });
     renderSettings(settings);
-    providerSelect.value = pending.provider;
     imageSelect.value = pending.image;
     videoSelect.value = pending.video;
-    if (pending.provider !== settings.provider || pending.image !== settings.image_model || pending.video !== settings.video_model) markDirty();
+    if (pending.image !== settings.image_model || pending.video !== settings.video_model) markDirty();
     el<HTMLElement>('pack-status').textContent = '组件包已保存并锁定校验值。请确认上方模型选择并保存。';
   } catch (error) { el<HTMLElement>('pack-status').textContent = `组件包保存失败：${String(error)}`; }
   finally { button.disabled = false; updateControls(); }
@@ -926,6 +1006,7 @@ await listen('deployment-finished', async () => {
   }
   updateControls();
 });
+await listen<IdleGuard>('idle-guard-changed', event => { idleGuard = event.payload; renderIdleGuard(); });
 await listen<string>('video-mode-progress', event => { el<HTMLElement>('mode-progress').textContent = event.payload; });
 await listen<{ok: boolean; message: string}>('video-mode-finished', async event => {
   ref2vaBusy = false;
@@ -933,7 +1014,8 @@ await listen<{ok: boolean; message: string}>('video-mode-finished', async event 
   el<HTMLElement>('mode-progress').textContent = event.payload.message;
   updateControls();
 });
-await Promise.all([refresh(), loadSettings(), refreshLocalComfy()]);
+await Promise.all([refresh(), loadSettings(), refreshLocalComfy(),
+  invoke<IdleGuard>('get_idle_guard').then(value => { idleGuard = value; renderIdleGuard(); })]);
 document.querySelector<HTMLElement>('.main')!.scrollTop = 0;
 setInterval(() => { if (!operating) void refresh(); }, 15000);
 setInterval(() => { void pollMetrics(); }, 1000);

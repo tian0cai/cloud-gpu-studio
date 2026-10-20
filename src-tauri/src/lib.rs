@@ -1,7 +1,7 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -117,6 +117,207 @@ struct Controller {
     local: Mutex<Option<Child>>,
 }
 
+const IDLE_WAIT: Duration = Duration::from_secs(300);
+const IDLE_WARNING: Duration = Duration::from_secs(15);
+
+#[derive(Default)]
+struct IdleGuard {
+    enabled: bool,
+    revision: u64,
+    machine: Option<String>,
+    idle_since: Option<Instant>,
+    warning_since: Option<Instant>,
+}
+
+#[derive(Deserialize)]
+struct IdleGuardConfig { enabled: bool }
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IdleGuardView {
+    enabled: bool,
+    phase: &'static str,
+    seconds_remaining: Option<u64>,
+}
+
+impl IdleGuard {
+    fn view(&self) -> IdleGuardView {
+        if !self.enabled {
+            IdleGuardView { enabled: false, phase: "off", seconds_remaining: None }
+        } else if let Some(since) = self.warning_since {
+            IdleGuardView { enabled: true, phase: "warning",
+                seconds_remaining: Some(IDLE_WARNING.as_secs().saturating_sub(since.elapsed().as_secs())) }
+        } else if let Some(since) = self.idle_since {
+            IdleGuardView { enabled: true, phase: "idle",
+                seconds_remaining: Some(IDLE_WAIT.as_secs().saturating_sub(since.elapsed().as_secs())) }
+        } else {
+            IdleGuardView { enabled: true, phase: "waiting", seconds_remaining: None }
+        }
+    }
+
+    fn clear_timer(&mut self) {
+        self.idle_since = None;
+        self.warning_since = None;
+    }
+}
+
+fn idle_config_path() -> PathBuf { work_dir().join("idle-guard.json") }
+
+fn load_idle_guard() -> IdleGuard {
+    let enabled = std::fs::read(idle_config_path()).ok()
+        .and_then(|bytes| serde_json::from_slice::<IdleGuardConfig>(&bytes).ok())
+        .is_some_and(|config| config.enabled);
+    IdleGuard { enabled, ..IdleGuard::default() }
+}
+
+fn save_idle_guard(enabled: bool) -> Result<(), String> {
+    let path = idle_config_path();
+    std::fs::create_dir_all(path.parent().ok_or("配置目录不存在")?).map_err(|e| e.to_string())?;
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, if enabled { b"{\"enabled\":true}\n".as_slice() } else { b"{\"enabled\":false}\n".as_slice() })
+        .map_err(|e| e.to_string())?;
+    std::fs::rename(temporary, path).map_err(|e| e.to_string())
+}
+
+fn comfy_queue_empty(port: u16) -> Result<bool, String> {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .map_err(|e| e.to_string())?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).map_err(|e| e.to_string())?;
+    stream.write_all(b"GET /queue HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .map_err(|e| e.to_string())?;
+    let mut response = Vec::new();
+    stream.take(1024 * 1024).read_to_end(&mut response).map_err(|e| e.to_string())?;
+    parse_comfy_queue(&response)
+}
+
+fn parse_comfy_queue(response: &[u8]) -> Result<bool, String> {
+    let split = response.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+        .ok_or("ComfyUI 队列响应不完整")?;
+    let header = String::from_utf8_lossy(&response[..split]);
+    if !header.starts_with("HTTP/1.0 200 ") && !header.starts_with("HTTP/1.1 200 ") {
+        return Err("ComfyUI 队列查询失败".into());
+    }
+    let value: Value = serde_json::from_slice(&response[split + 4..]).map_err(|e| e.to_string())?;
+    let running = value["queue_running"].as_array().ok_or("缺少执行中队列")?;
+    let pending = value["queue_pending"].as_array().ok_or("缺少待执行队列")?;
+    Ok(running.is_empty() && pending.is_empty())
+}
+
+fn machine_running(status: &Status) -> bool {
+    status.pod_status.as_deref().is_some_and(|value| value.eq_ignore_ascii_case("running"))
+}
+
+fn close_idle_warning(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("idle-warning") { let _ = window.close(); }
+}
+
+fn show_idle_warning(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("idle-warning") {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(app, "idle-warning", WebviewUrl::App("idle-warning.html".into()))
+        .title("Cloud GPU Studio · 空闲提醒")
+        .inner_size(440.0, 240.0)
+        .resizable(false)
+        .always_on_top(true)
+        .center()
+        .build().map_err(|e| e.to_string())?
+        .set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn idle_monitor(app: AppHandle, controller: Arc<Controller>, guard: Arc<Mutex<IdleGuard>>) {
+    thread::spawn(move || loop {
+        let warning = guard.lock().is_ok_and(|state| state.warning_since.is_some());
+        thread::sleep(Duration::from_secs(if warning { 1 } else { 5 }));
+        let enabled = guard.lock().is_ok_and(|state| state.enabled);
+        if !enabled { continue; }
+        // A failed status or queue check is unknown, never evidence of idleness.
+        let status = read_status(&controller);
+        let observation = status.ok().and_then(|s| {
+            if s.busy || s.launching || !s.local_ready || !s.tunnel_ready
+                || !machine_running(&s) { return None; }
+            let machine = format!("{}:{}", s.provider, s.pod_id?);
+            let local = comfy_queue_empty(8188).ok()?;
+            let remote = comfy_queue_empty(8189).ok()?;
+            Some((machine, local && remote))
+        });
+        let mut start_warning = false;
+        let mut stop_warning = false;
+        let mut delete_machine = None;
+        if let Ok(mut state) = guard.lock() {
+            if !state.enabled { continue; }
+            match observation {
+                Some((machine, idle)) => {
+                    if state.machine.as_deref() != Some(&machine) {
+                        state.machine = Some(machine.clone());
+                        state.clear_timer();
+                        stop_warning = true;
+                    }
+                    if idle {
+                        let since = *state.idle_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= IDLE_WAIT && state.warning_since.is_none() {
+                            state.warning_since = Some(Instant::now());
+                            start_warning = true;
+                        }
+                        if state.warning_since.is_some_and(|time| time.elapsed() >= IDLE_WARNING) {
+                            delete_machine = Some((machine, state.revision));
+                            state.clear_timer();
+                        }
+                    } else {
+                        stop_warning = state.warning_since.is_some();
+                        state.clear_timer();
+                    }
+                }
+                None => {
+                    stop_warning = state.warning_since.is_some();
+                    state.machine = None;
+                    state.clear_timer();
+                }
+            }
+        }
+        if stop_warning { close_idle_warning(&app); }
+        if start_warning {
+            if let Err(error) = show_idle_warning(&app) {
+                // A failed warning must never trigger a silent deletion.
+                if let Ok(mut state) = guard.lock() { state.clear_timer(); }
+                emit(&app, "idle-warning-error", format!("无法显示空闲提醒：{error}"), 0, None, "error");
+            }
+        }
+        if let Some((machine, revision)) = delete_machine {
+            close_idle_warning(&app);
+            // Recheck identity and both queues at the moment of deletion.
+            if begin(&controller).is_err() { continue; }
+            let safe = read_status(&controller).ok().is_some_and(|s| {
+                format!("{}:{}", s.provider, s.pod_id.as_deref().unwrap_or_default()) == machine
+                    && s.local_ready && s.tunnel_ready
+                    && machine_running(&s)
+            }) && comfy_queue_empty(8188) == Ok(true) && comfy_queue_empty(8189) == Ok(true)
+                && guard.lock().is_ok_and(|state| state.enabled && state.revision == revision
+                    && state.machine.as_deref() == Some(&machine));
+            if safe {
+                emit(&app, "deleting", "ComfyUI 空闲超过 5 分钟且倒计时结束，正在自动删除云端机器…", 5, None, "info");
+                let result = run_script_stream(&app, "stop", None, None);
+                match result {
+                    Ok(()) => {
+                        if let Ok(mut tunnel) = controller.tunnel.lock() {
+                            if let Some(mut child) = tunnel.take() { let _ = child.kill(); let _ = child.wait(); }
+                        }
+                        emit(&app, "deleted", "空闲云端机器已自动删除；本地作品仍保留。", 100, None, "success");
+                    }
+                    Err(error) => emit(&app, "error", format!("自动删除失败：{error}"), 0, None, "error"),
+                }
+                let _ = app.emit("deployment-finished", ());
+            }
+            controller.busy.store(false, Ordering::SeqCst);
+        }
+        if let Ok(state) = guard.lock() { let _ = app.emit("idle-guard-changed", state.view()); }
+    });
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Progress {
@@ -213,6 +414,8 @@ fn report_line(app: &AppHandle, line: &str) {
         ("verifying", 82)
     } else if message == "PYTHON_DEPENDENCIES_READY" {
         ("installing", 65)
+    } else if message == "CUDA13_ATTENTION_READY" {
+        ("installing", 70)
     } else if message == "ALL_MODELS_VERIFIED" {
         ("downloading", 75)
     } else if message.starts_with("Created ") {
@@ -225,6 +428,8 @@ fn report_line(app: &AppHandle, line: &str) {
         ("downloading", 20 + (value as u16 * 55 / 100) as u8)
     } else if message.contains("Installing ComfyUI") || message.contains("Installing Python") || message.contains("Cloning") {
         ("installing", 17)
+    } else if message.contains("Installing CUDA 13") {
+        ("installing", 65)
     } else if message.contains("Waiting for model download") {
         ("downloading", 65)
     } else if message.contains("downloading") || message.contains("Downloading") {
@@ -240,6 +445,7 @@ fn report_line(app: &AppHandle, line: &str) {
     };
     let display = match message {
         "PYTHON_DEPENDENCIES_READY" => "Python 依赖已安装，正在确认模型下载与校验状态…",
+        "CUDA13_ATTENTION_READY" => "CUDA 13 加速算子已就绪，正在确认模型下载与校验状态…",
         "ALL_MODELS_VERIFIED" => "模型文件已下载并校验，正在确认 Python 依赖安装状态…",
         "INSTALL_DOWNLOAD_READY" => "模型与 Python 依赖均已就绪，正在校验并启动云端 ComfyUI…",
         _ => message,
@@ -603,6 +809,54 @@ fn begin(controller: &Controller) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_idle_guard(guard: State<'_, Arc<Mutex<IdleGuard>>>) -> Result<IdleGuardView, String> {
+    guard.lock().map(|state| state.view()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_idle_guard(app: AppHandle, guard: State<'_, Arc<Mutex<IdleGuard>>>, enabled: bool) -> Result<IdleGuardView, String> {
+    save_idle_guard(enabled)?;
+    let view = {
+        let mut state = guard.lock().map_err(|e| e.to_string())?;
+        state.enabled = enabled;
+        state.revision = state.revision.wrapping_add(1);
+        state.machine = None;
+        state.clear_timer();
+        state.view()
+    };
+    close_idle_warning(&app);
+    let _ = app.emit("idle-guard-changed", &view);
+    Ok(view)
+}
+
+#[tauri::command]
+fn keep_idle_machine(app: AppHandle, guard: State<'_, Arc<Mutex<IdleGuard>>>) -> Result<(), String> {
+    let mut state = guard.lock().map_err(|e| e.to_string())?;
+    state.revision = state.revision.wrapping_add(1);
+    if state.machine.is_some() {
+        state.warning_since = None;
+        state.idle_since = Some(Instant::now());
+    }
+    let view = state.view();
+    drop(state);
+    close_idle_warning(&app);
+    let _ = app.emit("idle-guard-changed", view);
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_idle_machine(app: AppHandle, controller: State<'_, Arc<Controller>>,
+                       guard: State<'_, Arc<Mutex<IdleGuard>>>) -> Result<(), String> {
+    {
+        let mut state = guard.lock().map_err(|e| e.to_string())?;
+        state.revision = state.revision.wrapping_add(1);
+        state.clear_timer();
+    }
+    close_idle_warning(&app);
+    delete_cloud(app, controller)
+}
+
+#[tauri::command]
 fn launch(app: AppHandle, controller: State<'_, Arc<Controller>>,
           offer_id: Option<String>, max_price: Option<f64>) -> Result<(), String> {
     begin(&controller)?;
@@ -785,14 +1039,22 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(Arc::new(Controller::default()))
+        .manage(Arc::new(Mutex::new(load_idle_guard())))
+        .setup(|app| {
+            let controller = app.state::<Arc<Controller>>().inner().clone();
+            let guard = app.state::<Arc<Mutex<IdleGuard>>>().inner().clone();
+            idle_monitor(app.handle().clone(), controller, guard);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![get_status, get_settings, save_settings,
             save_api_key, inspect_hf_model, save_model_pack, prepare_ref2va, prepare_fl2va, get_local_comfy_status,
             check_local_comfy_update, manage_local_comfy, stop_local_comfy, get_gpu_offers, get_host_metrics,
-            launch, cancel_launch, delete_cloud, open_comfy_window])
+            launch, cancel_launch, delete_cloud, open_comfy_window,
+            get_idle_guard, set_idle_guard, keep_idle_machine, delete_idle_machine])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.app_handle().state::<Arc<Controller>>();
-                if state.busy.load(Ordering::SeqCst) {
+                if window.label() == "main" && state.busy.load(Ordering::SeqCst) {
                     api.prevent_close();
                     emit(&window.app_handle(), "working", "操作正在进行，请等当前步骤结束后再关闭窗口。", 0, None, "info");
                 }
@@ -809,4 +1071,28 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    #[test]
+    fn queue_must_be_empty_on_both_lists() {
+        fn response(body: &str) -> Vec<u8> {
+            format!("HTTP/1.0 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len()).into_bytes()
+        }
+        assert_eq!(parse_comfy_queue(&response(r#"{"queue_running":[],"queue_pending":[]}"#)), Ok(true));
+        assert_eq!(parse_comfy_queue(&response(r#"{"queue_running":[[1]],"queue_pending":[]}"#)), Ok(false));
+        assert_eq!(parse_comfy_queue(&response(r#"{"queue_running":[],"queue_pending":[[2]]}"#)), Ok(false));
+        assert!(parse_comfy_queue(&response(r#"{"queue_running":[]}"#)).is_err());
+        assert!(parse_comfy_queue(b"HTTP/1.0 503 Unavailable\r\n\r\n{}").is_err());
+    }
+
+    #[test]
+    fn warning_countdown_is_bounded() {
+        let state = IdleGuard { enabled: true, warning_since: Some(Instant::now() - Duration::from_secs(3)), ..IdleGuard::default() };
+        assert_eq!(state.view().phase, "warning");
+        assert!(state.view().seconds_remaining.unwrap() <= 12);
+    }
 }

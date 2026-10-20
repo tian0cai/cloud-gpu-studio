@@ -17,7 +17,18 @@ DEPLOYABLE = Path(__file__).resolve().parent
 GPU_TYPES = ('NVIDIA A100-SXM4-80GB', 'NVIDIA A100 80GB PCIe')
 DATACENTERS = ('CA-MTL-3', 'EUR-IS-1', 'US-KS-2', 'US-MD-1')
 IMAGE = 'runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04'
-VOLUME_GB = 180  # Room for both H3 modes, image models, downloads and outputs.
+CONTAINER_DISK_GB = 30
+# Current pinned manifests: 70.4 GB for the selected Ref2VA + image set, or
+# about 105 GB with both H3 video modes. ComfyUI, the CUDA/PyTorch venv, logs,
+# downloads and outputs add roughly 30-40 GB. 160 GB leaves headroom without
+# forcing the Pod onto a host that has 180 GB free but no room for the
+# container disk as well.
+VOLUME_GB = 160
+# A quote can be priced for a host whose free disk is smaller than the Pod we
+# actually request. Ask RunPod for hosts that fit the container disk and volume
+# together, otherwise the offer looks available but creation fails.
+TOTAL_DISK_GB = CONTAINER_DISK_GB + VOLUME_GB
+MIN_VCPU_COUNT = 8
 
 
 def ensure_ssh_key():
@@ -67,6 +78,20 @@ def ssh_info(pod_id):
 
 def ssh_command(info, *remote):
     return ['ssh', *info['options'], '-p', info['port'], info['host'], *remote]
+
+
+def ssh_ready(info):
+    """Treat a slow first handshake as "not ready yet", not as a fatal error.
+
+    RunPod exposes the public SSH port before sshd has finished starting. The
+    first connection can therefore hang past the timeout; aborting the whole
+    deployment in that case deletes a healthy, already-billed Pod.
+    """
+    try:
+        return subprocess.run(ssh_command(info, 'true'), capture_output=True,
+                              timeout=25).returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def stop():
@@ -122,7 +147,9 @@ def quote_gpu(dc, gpu):
     query = ('query { gpuTypes(input: {id: ' + json.dumps(gpu)
              + '}) { lowestPrice(input: {gpuCount: 1, secureCloud: true, dataCenterId: '
              + json.dumps(dc)
-             + ', minMemoryInGb: 96, supportPublicIp: true}) { uninterruptablePrice stockStatus } } }')
+             + ', minMemoryInGb: 96, supportPublicIp: true, minDisk: ' + str(TOTAL_DISK_GB)
+             + ', minVcpuCount: ' + str(MIN_VCPU_COUNT)
+             + '}) { uninterruptablePrice stockStatus } } }')
     return gql(query)['gpuTypes'][0]['lowestPrice']
 
 
@@ -138,7 +165,8 @@ def selected_price_limit():
 
 def offer_catalog(max_hourly):
     base_query = ('query { gpuTypes { id memoryInGb lowestPrice(input: '
-                  '{gpuCount: 1, secureCloud: true, minMemoryInGb: 96, supportPublicIp: true}) '
+                  '{gpuCount: 1, secureCloud: true, minMemoryInGb: 96, supportPublicIp: true, '
+                  'minDisk: ' + str(TOTAL_DISK_GB) + ', minVcpuCount: ' + str(MIN_VCPU_COUNT) + '}) '
                   '{ uninterruptablePrice stockStatus } } }')
     types = []
     for item in gql(base_query)['gpuTypes']:
@@ -158,7 +186,9 @@ def offer_catalog(max_hourly):
         for index, (gpu, dc) in enumerate(batch):
             fields.append('q' + str(index) + ': gpuTypes(input: {id: ' + json.dumps(gpu['id'])
                           + '}) { lowestPrice(input: {gpuCount: 1, secureCloud: true, dataCenterId: '
-                          + json.dumps(dc) + ', minMemoryInGb: 96, supportPublicIp: true}) '
+                          + json.dumps(dc) + ', minMemoryInGb: 96, supportPublicIp: true, '
+                          + 'minDisk: ' + str(TOTAL_DISK_GB)
+                          + ', minVcpuCount: ' + str(MIN_VCPU_COUNT) + '}) '
                           + '{ uninterruptablePrice stockStatus } }')
         result = gql('query { ' + ' '.join(fields) + ' }')
         for index, (gpu, dc) in enumerate(batch):
@@ -212,8 +242,8 @@ def start():
             continue
         args = {
             'cloudType': 'SECURE', 'gpuCount': 1, 'gpuTypeId': gpu, 'dataCenterId': dc,
-            'containerDiskInGb': 30, 'volumeInGb': VOLUME_GB, 'volumeMountPath': '/workspace',
-            'minMemoryInGb': 96, 'minVcpuCount': 8, 'name': 'cloud-gpu-studio-disposable',
+            'containerDiskInGb': CONTAINER_DISK_GB, 'volumeInGb': VOLUME_GB, 'volumeMountPath': '/workspace',
+            'minMemoryInGb': 96, 'minVcpuCount': MIN_VCPU_COUNT, 'name': 'cloud-gpu-studio-disposable',
             'imageName': IMAGE, 'ports': '22/tcp', 'startSsh': True, 'startJupyter': False,
             'supportPublicIp': True, 'terminateAfter': deadline,
             'env': [{'key': 'PUBLIC_KEY', 'value': public_key}],
@@ -247,7 +277,7 @@ def start():
         print(f"Created {pod['id']} at ${pod['costPerHr']}/hour; waiting for SSH.", flush=True)
         for _ in range(90):
             info = ssh_info(pod['id'])
-            if info and subprocess.run(ssh_command(info, 'true'), capture_output=True, timeout=25).returncode == 0:
+            if info and ssh_ready(info):
                 break
             time.sleep(10)
         else:
@@ -278,7 +308,7 @@ def resume():
     print('Checking existing RunPod machine before continuing deployment...', flush=True)
     for _ in range(90):
         info = ssh_info(pod['id'])
-        if info and subprocess.run(ssh_command(info, 'true'), capture_output=True, timeout=25).returncode == 0:
+        if info and ssh_ready(info):
             break
         time.sleep(10)
     else:
