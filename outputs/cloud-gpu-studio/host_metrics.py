@@ -79,8 +79,11 @@ print(json.dumps(result))
 
 
 def collect(provider):
-    if provider == 'vast':
-        import vast_control as cloud
+    if provider in ('vast', 'vultr'):
+        if provider == 'vast':
+            import vast_control as cloud
+        else:
+            import vultr_control as cloud
         saved = cloud.state()
         if not saved.get('id'):
             return {'online': False}

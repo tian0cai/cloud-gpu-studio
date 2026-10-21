@@ -4,10 +4,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from app_config import WORK, REF2VA_READY, FL2VA_READY, read, validate_local_pack
+from app_config import WORK, REF2VA_READY, FL2VA_READY, DEPLOYMENT_FILES, read, validate_local_pack
 
 ACTIVE = WORK / 'active-provider.json'
 HERE = Path(__file__).resolve().parent
+CONTROLLERS = {'runpod': 'runpod_control.py', 'vast': 'vast_control.py',
+               'vultr': 'vultr_control.py'}
 
 
 def active_provider():
@@ -20,7 +22,7 @@ def provider():
 
 def run(command, chosen=None):
     name = chosen or provider()
-    target = HERE / ('vast_control.py' if name == 'vast' else 'runpod_control.py')
+    target = HERE / CONTROLLERS[name]
     return subprocess.run([sys.executable, '-u', str(target), command])
 
 
@@ -30,8 +32,11 @@ def prepare_mode(mode):
         raise RuntimeError('请先启动并连接云端机器。')
     if read()['video_model'] == 'none':
         raise RuntimeError('当前配置没有部署 H3 视频模型。')
-    if chosen == 'vast':
-        import vast_control as control
+    if chosen in ('vast', 'vultr'):
+        if chosen == 'vast':
+            import vast_control as control
+        else:
+            import vultr_control as control
         current = control.instance()
         machine_id = (current or {}).get('id')
         info = control.ssh_info(current) if current else None
@@ -77,7 +82,7 @@ def main():
     command = sys.argv[1]
     if command == 'status':
         chosen = provider()
-        target = HERE / ('vast_control.py' if chosen == 'vast' else 'runpod_control.py')
+        target = HERE / CONTROLLERS[chosen]
         result = subprocess.run([sys.executable, '-u', str(target), 'status'],
                                 text=True, capture_output=True)
         if result.returncode:
@@ -112,8 +117,8 @@ def main():
         ACTIVE.write_text(json.dumps({'provider': selected}) + '\n')
         result = run(command, selected)
         if result.returncode == 0 and read()['video_model'] != 'none':
-            state = json.loads((WORK / ('vast-deployment.json' if selected == 'vast' else 'deployment.json')).read_text())
-            machine_id = state.get('id') if selected == 'vast' else (state.get('pod') or {}).get('id')
+            state = json.loads((WORK / DEPLOYMENT_FILES[selected]).read_text())
+            machine_id = (state.get('pod') or {}).get('id') if selected == 'runpod' else state.get('id')
             if machine_id:
                 marker = REF2VA_READY if read()['video_mode'] == 'ref2va' else FL2VA_READY
                 marker.write_text(json.dumps({'provider': selected, 'id': str(machine_id)}) + '\n')

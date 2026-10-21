@@ -48,6 +48,7 @@
       "../outputs/cloud-gpu-studio/runpod_control.py": "outputs/cloud-gpu-studio/runpod_control.py",
       "../outputs/cloud-gpu-studio/setup_remote.sh": "outputs/cloud-gpu-studio/setup_remote.sh",
       "../outputs/cloud-gpu-studio/vast_control.py": "outputs/cloud-gpu-studio/vast_control.py",
+      "../outputs/cloud-gpu-studio/vultr_control.py": "outputs/cloud-gpu-studio/vultr_control.py",
       "../outputs/cloud-gpu-studio/workflows/H3-单图首帧-FL2VA.json": "outputs/cloud-gpu-studio/workflows/H3-单图首帧-FL2VA.json",
       "../outputs/cloud-gpu-studio/workflows/H3-双图参考-Ref2VA.json": "outputs/cloud-gpu-studio/workflows/H3-双图参考-Ref2VA.json",
       "../outputs/cloud-gpu-studio/comfyui_cloud_bridge/LICENSE": "outputs/cloud-gpu-studio/comfyui_cloud_bridge/LICENSE",

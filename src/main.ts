@@ -6,7 +6,7 @@ import { currentLanguage, setLanguage, startI18n } from './i18n';
 import './style.css';
 
 type Status = {
-  provider: 'runpod' | 'vast';
+  provider: 'runpod' | 'vast' | 'vultr';
   podId: string | null;
   podStatus: string | null;
   costPerHour: number | null;
@@ -21,7 +21,7 @@ type ModelFile = { repo: string; revision: string; filename: string; destination
 type ImageModel = 'qwen' | 'local-qwen' | 'checkpoint' | 'none';
 type VideoModel = 'h3' | 'local-h3' | 'none';
 type LocalPack = { ready: true; image: Record<string, string>; video: Record<string, string>; urls: Record<'qwen' | 'h3', Record<string, string>>; size_gb: number } | { ready: false; error: string };
-type Settings = { provider: 'runpod' | 'vast'; image_model: ImageModel; video_model: VideoModel; video_mode: 'fl2va' | 'ref2va'; h3_attention: 'standard' | 'sol-attn'; ref2va_ready: boolean; fl2va_ready: boolean; custom_model: ModelFile | null; local_models_available: boolean; local_pack: LocalPack; keys: Record<'runpod' | 'vast', boolean> };
+type Settings = { provider: 'runpod' | 'vast' | 'vultr'; image_model: ImageModel; video_model: VideoModel; video_mode: 'fl2va' | 'ref2va'; h3_attention: 'standard' | 'sol-attn'; ref2va_ready: boolean; fl2va_ready: boolean; custom_model: ModelFile | null; local_models_available: boolean; local_pack: LocalPack; keys: Record<'runpod' | 'vast' | 'vultr', boolean> };
 type Progress = {
   phase: string;
   message: string;
@@ -61,10 +61,10 @@ app.innerHTML = `
             <div class="pack-actions"><button id="save-pack" type="button">检查并保存组件包</button><span id="pack-status">每个链接会锁定版本、大小与 SHA-256；只支持上述两种节点架构。</span></div><p>组件包保存在本机受限目录，不会写入公共仓库。多参考模式使用独立的 Ref2VA 主模型；现有 H3 文本编码器和 VAE 会复用，LoRA 需另行验证适配。</p></details>
           <div class="config-actions"><button id="save-config" type="button">保存模型方案</button><span id="config-message">选择会在下一次新建机器时生效。</span></div>
           <div class="mode-panel"><div><strong>H3 视频模式</strong><small id="mode-state">多参考 Ref2VA 已启用</small></div><div class="mode-actions"><button id="download-ref2va" type="button">下载多参考模型</button><button id="switch-ref2va" type="button">切换到多参考</button><button id="download-fl2va" type="button">下载首帧模型</button><button id="switch-fl2va" type="button">切回首帧模式</button></div><small id="mode-progress">新机器优先下载 Ref2VA；首帧 FL2VA 可在机器启动后按需下载。</small><div class="attention-actions"><label>H3 注意力加速<select id="h3-attention"><option value="standard">标准（画质优先）</option><option value="sol-attn">Sol-Attn（实验）</option></select></label><button id="save-h3-attention" type="button">应用到下一次生成</button><small id="attention-status">不会改变现有工作流；Sol-Attn 需要云端 CUDA 算子支持。</small></div></div>
-          <p class="config-footnote">新建机器预留双模式磁盘：RunPod 180 GB、Vast.ai 200 GB；磁盘费用由平台计入报价或另行计费。兼容的 80 GB 以上单卡，按需实例；Vast.ai 累计费用达到 $9 自动删除，RunPod 保留原 3 小时限制。报价筛选可留空。</p>
+          <p class="config-footnote">RunPod 使用 160 GB 工作空间，Vast.ai 申请 180 GB 磁盘；Vultr 使用方案自带、至少 160 GB 的磁盘。筛选至少 80 GB 显存的单卡；Vast.ai 和 Vultr 累计费用达到 $9 时自动删除，RunPod 保留 3 小时限制。报价筛选可留空。</p>
         </div>
         <div class="offer-card"><div class="section-head"><div><div class="eyebrow">LIVE GPU MARKET</div><h3>选择显卡与价格</h3></div><span id="offer-count" class="offer-count">尚未查询</span></div>
-          <div class="provider-row"><label>云平台<select id="provider"><option value="runpod">RunPod</option><option value="vast">Vast.ai</option></select></label><small id="provider-message" role="status">切换平台后自动保存，再查询该平台报价。</small></div>
+          <div class="provider-row"><label>云平台<select id="provider"><option value="runpod">RunPod</option><option value="vast">Vast.ai</option><option value="vultr">Vultr</option></select></label><small id="provider-message" role="status">切换平台后自动保存，再查询该平台报价。</small></div>
           <div class="offer-controls"><label>每小时价格筛选（美元，可留空）<input id="max-price" type="number" min="0.001" step="0.001" placeholder="不限"></label><label>显卡型号<select id="gpu-filter"><option value="">全部兼容型号</option></select></label><button id="query-offers" type="button">查询实时报价</button></div>
           <p id="offer-message" class="offer-message">选择平台并保存模型方案后查询报价，再选择一台机器；启动时会重新核对库存和价格。</p><div id="gpu-offers" class="offer-list"></div>
         </div>
@@ -131,10 +131,11 @@ pages.models.append(document.querySelector('.config-card')!);
 const settingsCard = document.createElement('div');
 settingsCard.className = 'settings-card';
 settingsCard.innerHTML = `<div class="section-head"><div><div class="eyebrow">PRIVATE CREDENTIALS</div><h3>平台 API Key</h3></div></div>
-  <p>RunPod 和 Vast.ai 的密钥可以分别配置。部署时使用“模型方案”中选定的平台；已保存的密钥不会显示在界面上。</p>
+  <p>RunPod、Vast.ai 和 Vultr 的密钥可以分别配置。部署时使用“模型方案”中选定的平台；已保存的密钥不会显示在界面上。</p>
   <div class="provider-keys">
     <div class="provider-key-card"><div class="provider-key-heading"><strong>RunPod</strong><span id="key-badge-runpod">检查中</span></div><div class="key-row"><label>RunPod API Key<input id="api-key-runpod" type="password" autocomplete="off" placeholder="输入新的 RunPod API Key" spellcheck="false"></label><button id="save-key-runpod" type="button">保存</button><small id="key-state-runpod">正在检查密钥状态…</small></div></div>
     <div class="provider-key-card"><div class="provider-key-heading"><strong>Vast.ai</strong><span id="key-badge-vast">检查中</span></div><div class="key-row"><label>Vast.ai API Key<input id="api-key-vast" type="password" autocomplete="off" placeholder="输入新的 Vast.ai API Key" spellcheck="false"></label><button id="save-key-vast" type="button">保存</button><small id="key-state-vast">正在检查密钥状态…</small></div></div>
+    <div class="provider-key-card"><div class="provider-key-heading"><strong>Vultr</strong><span id="key-badge-vultr">检查中</span></div><div class="key-row"><label>Vultr API Key<input id="api-key-vultr" type="password" autocomplete="off" placeholder="输入新的 Vultr API Key" spellcheck="false"></label><button id="save-key-vultr" type="button">保存</button><small id="key-state-vultr">正在检查密钥状态…</small></div></div>
   </div>`;
 pages.settings.append(settingsCard);
 const updateCard = document.createElement('div');
@@ -221,6 +222,10 @@ const launch = el<HTMLButtonElement>('launch');
 const remove = el<HTMLButtonElement>('delete');
 const cancelButton = el<HTMLButtonElement>('cancel-launch');
 const log = el<HTMLDivElement>('log-lines');
+function providerName(provider: string | undefined): string {
+  return provider === 'vast' ? 'Vast.ai' : provider === 'vultr' ? 'Vultr' : 'RunPod';
+}
+
 const providerSelect = el<HTMLSelectElement>('provider');
 const imageSelect = el<HTMLSelectElement>('image-model');
 const videoSelect = el<HTMLSelectElement>('video-model');
@@ -281,7 +286,7 @@ const deleteSteps = ['提交删除', '释放云端资源', '确认完成'];
 const cancelSteps = ['提交取消', '停止部署', '机器保留'];
 
 function renderHome() {
-  const provider = savedSettings?.provider === 'vast' ? 'Vast.ai' : 'RunPod';
+  const provider = providerName(savedSettings?.provider);
   el<HTMLElement>('home-provider').textContent = savedSettings ? `${provider} · ${savedSettings.video_mode === 'ref2va' ? '多参考模式' : '首帧模式'}` : '正在读取配置';
   const image = { qwen: 'Qwen Image 2.1', 'local-qwen': '自选 Qwen', checkpoint: 'HF Checkpoint', none: '无图片模型' }[savedSettings?.image_model || 'none'];
   const video = { h3: 'MiniMax H3', 'local-h3': '自选 H3', none: '无视频模型' }[savedSettings?.video_model || 'none'];
@@ -370,7 +375,7 @@ function updateControls() {
   for (const id of ['provider', 'image-model', 'video-model', 'model-url', 'inspect-model', 'save-config']) {
     (el<HTMLInputElement | HTMLButtonElement | HTMLSelectElement>(id)).disabled = locked || providerSaving;
   }
-  for (const provider of ['runpod', 'vast']) {
+  for (const provider of ['runpod', 'vast', 'vultr']) {
     el<HTMLInputElement>(`api-key-${provider}`).disabled = locked;
     el<HTMLButtonElement>(`save-key-${provider}`).disabled = locked;
   }
@@ -486,7 +491,7 @@ function renderSettings(settings: Settings) {
   packDirty = false;
   providerSelect.value = settings.provider;
   el<HTMLElement>('provider-message').textContent = settings.keys[settings.provider]
-    ? `当前平台：${settings.provider === 'vast' ? 'Vast.ai' : 'RunPod'}。切换后自动保存。`
+    ? `当前平台：${providerName(settings.provider)}。切换后自动保存。`
     : '当前平台尚未配置 API Key，请到账户设置保存。';
   imageSelect.value = settings.image_model;
   videoSelect.value = settings.video_model;
@@ -501,7 +506,7 @@ function renderSettings(settings: Settings) {
   configDirty = false;
   el<HTMLElement>('custom-row').hidden = settings.image_model !== 'checkpoint';
   renderPack(settings);
-  for (const provider of ['runpod', 'vast'] as const) {
+  for (const provider of ['runpod', 'vast', 'vultr'] as const) {
     const ready = settings.keys[provider];
     el<HTMLElement>(`key-badge-${provider}`).textContent = ready ? '已配置' : '未配置';
     el<HTMLElement>(`key-badge-${provider}`).classList.toggle('ready', ready);
@@ -577,7 +582,7 @@ async function fetchOffers() {
   const revision = ++offerQueryRevision;
   selectedOffer = null;
   el<HTMLElement>('offer-count').textContent = '查询中';
-  el<HTMLElement>('offer-message').textContent = `正在查询 ${savedSettings?.provider === 'vast' ? 'Vast.ai' : 'RunPod'} 的实时库存和价格…`;
+  el<HTMLElement>('offer-message').textContent = `正在查询 ${providerName(savedSettings?.provider)} 的实时库存和价格…`;
   el<HTMLDivElement>('gpu-offers').replaceChildren();
   updateControls();
   try {
@@ -663,6 +668,7 @@ function renderStatus(s: Status) {
   el<HTMLElement>('pod-value').textContent = s.podId ? '运行中' : '未启动';
   el<HTMLElement>('pod-detail').textContent = s.podId ? `Pod ${s.podId}` : '没有运行中的 Pod';
   if (s.provider === 'vast' && s.podId) el<HTMLElement>('pod-detail').textContent = `Vast.ai 实例 ${s.podId}`;
+  if (s.provider === 'vultr' && s.podId) el<HTMLElement>('pod-detail').textContent = `Vultr 实例 ${s.podId}`;
   el<HTMLElement>('price-value').textContent = s.costPerHour === null ? '—' : `$${s.costPerHour.toFixed(2)}`;
   el<HTMLElement>('balance-value').textContent = s.balance === null ? '—' : `$${s.balance.toFixed(2)}`;
   const connected = s.localReady && s.tunnelReady && Boolean(s.podId);
@@ -813,7 +819,7 @@ providerSelect.addEventListener('change', async () => {
     providerSelect.value = settings.provider;
     renderHome();
     el<HTMLElement>('provider-message').textContent = settings.keys[settings.provider]
-      ? `已切换至 ${settings.provider === 'vast' ? 'Vast.ai' : 'RunPod'}，可以查询实时报价。`
+      ? `已切换至 ${providerName(settings.provider)}，可以查询实时报价。`
       : '已切换平台；请先到账户设置保存该平台 API Key。';
     el<HTMLElement>('offer-message').textContent = configDirty ? '请先保存模型方案，再查询当前平台报价。' : '请选择价格条件并查询当前平台报价。';
   } catch (error) {
@@ -943,7 +949,7 @@ el<HTMLButtonElement>('save-pack').addEventListener('click', async () => {
   finally { button.disabled = false; updateControls(); }
 });
 
-for (const provider of ['runpod', 'vast'] as const) {
+for (const provider of ['runpod', 'vast', 'vultr'] as const) {
   el<HTMLButtonElement>(`save-key-${provider}`).addEventListener('click', async () => {
     const input = el<HTMLInputElement>(`api-key-${provider}`);
     const key = input.value.trim();

@@ -6,20 +6,20 @@
 
 ![Home screen preview](docs/images/home-en.jpg)
 
-Cloud GPU Studio is a desktop controller for a local ComfyUI and disposable cloud GPUs. It currently supports RunPod and Vast.ai. The app lets users select a GPU offer and hourly price limit, prepares a remote ComfyUI, downloads a selected model preset, opens an SSH tunnel, and connects a local ComfyUI window. Cloud machines and their temporary storage can be deleted from the app; generated files remain local.
+Cloud GPU Studio is a desktop controller for a local ComfyUI and disposable cloud GPUs. It currently supports RunPod, Vast.ai, and Vultr. The app lets users select a GPU offer and hourly price limit, prepares a remote ComfyUI, downloads a selected model preset, opens an SSH tunnel, and connects a local ComfyUI window. Cloud machines and their temporary storage can be deleted from the app; generated files remain local.
 
 The public presets use model files from the official Comfy-Org MiniMax H3 and Qwen Image 2.1 repositories. File revisions, sizes, and SHA-256 checksums are pinned in `outputs/cloud-gpu-studio/models.lock.json`. Model weights are downloaded directly from Hugging Face when a user starts a machine; they are not included in this repository or the application bundle. The bundled example workflows use general prompts.
 
 ## Current scope
 
-- Choose RunPod or Vast.ai and store separate API keys locally. Switch the application language between Simplified Chinese and English from the sidebar.
-- Query live GPU offers on either platform, filter by GPU model or an optional hourly price ceiling, and select an exact machine before launch. With no ceiling entered, the selected quote itself becomes the launch price limit. The app rechecks stock and price at launch and asks for a new selection if that offer is no longer eligible. The list keeps at least one quote per eligible GPU model, including Vast.ai A800 where available.
+- Choose RunPod, Vast.ai, or Vultr and store separate API keys locally. Switch the application language between Simplified Chinese and English from the sidebar.
+- Query live GPU offers on each platform, filter by GPU model or an optional hourly price ceiling, and select an exact machine before launch. With no ceiling entered, the selected quote itself becomes the launch price limit. The app rechecks stock and price at launch and asks for a new selection if that offer is no longer eligible. The list keeps at least one quote per eligible GPU model, including Vast.ai A800 where available.
 - Choose image and video models independently. The public H3 and Qwen Image 2.1 presets can be combined with compatible local component packs. A public, single-file SD/SDXL image checkpoint can also be selected by its Hugging Face link.
 - See deployment stages, model transfer progress, hourly price, account balance, and connection state.
 - Watch remote CPU and GPU utilization plus RAM and VRAM usage in live charts sampled about every second after the machine's SSH service is ready. The telemetry SSH connection is reused between samples.
 - Open or stop a local ComfyUI window. The bridge nodes run jobs on the cloud ComfyUI over an SSH tunnel and save results under the local ComfyUI output directory. The local panel shows whether the process is running, and **Close ComfyUI** stops it so it does not stay resident in memory.
 - Install or repair the local ComfyUI from the official GitHub repository, check for updates, and update it from inside the app. Updating a running local ComfyUI asks first, stops it, then restarts it after the update. Existing workflows, custom nodes, and outputs are preserved.
-- Delete the cloud instance and its temporary storage. RunPod has a time and spending guard; Vast.ai has a spending guard.
+- Delete the cloud instance and its temporary storage. RunPod has a time and spending guard; Vast.ai and Vultr have spending guards. Vultr also has a 3-hour limit.
 - Optionally enable idle auto-deletion on the Cloud machines page. While the desktop app remains open, it checks both local and cloud ComfyUI running/pending queues. After both stay empty for five minutes, an always-on-top 15-second countdown lets you keep the machine; otherwise the same delete action removes the instance and temporary storage. Unknown queue status or a lost connection prevents auto-deletion. This setting starts off and is saved locally.
 - Cancel a deployment while a machine is starting or downloading models without deleting the cloud instance. The machine keeps billing until you explicitly delete it; **Connect to existing machine** resumes installation if it was interrupted.
 
@@ -83,3 +83,5 @@ The app uses ad-hoc macOS signing in CI. A broadly distributed macOS app should 
 ## License and third parties
 
 Copyright (C) 2026 tian0cai. The original Cloud GPU Studio application and its ComfyUI bridge node are licensed under [GNU GPL version 3 or later](LICENSE). You may use, modify, and sell the application. If you distribute a modified version, you must retain the applicable copyright and license notices, license the covered work under the GPL, and provide the corresponding source code to recipients. Private modifications need not be published. The GPL does not generally govern videos, images, or other output made with the app; model, service, and other third-party terms still apply. See [copyright and attribution](COPYRIGHT.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
+
+Vultr Cloud GPU uses a GPU-enabled Ubuntu image with a plan-included disk of at least 160 GB. The app checks the selected plan in the selected region immediately before creation. Vultr deletes the tracked instance at $9 accrued cost or after 3 hours. Add a Vultr API key in Accounts before querying offers. Live provisioning requires a Vultr account with GPU quota and available credit.

@@ -13,7 +13,9 @@ SETTINGS = WORK / 'app-settings.json'
 SECRETS = WORK / 'secrets'
 DEFAULT = {'provider': 'runpod', 'image_model': 'qwen', 'video_model': 'h3',
            'video_mode': 'ref2va', 'h3_attention': 'standard', 'custom_model': None}
-KEY_FILES = {'runpod': 'runpod_api_key', 'vast': 'vast_api_key'}
+KEY_FILES = {'runpod': 'runpod_api_key', 'vast': 'vast_api_key', 'vultr': 'vultr_api_key'}
+DEPLOYMENT_FILES = {'runpod': 'deployment.json', 'vast': 'vast-deployment.json',
+                    'vultr': 'vultr-deployment.json'}
 MODEL_OVERRIDES = WORK / 'model-overrides.json'
 REF2VA_READY = WORK / 'ref2va-ready.json'
 FL2VA_READY = WORK / 'fl2va-ready.json'
@@ -23,9 +25,9 @@ def model_ready(marker_path):
     try:
         marker = json.loads(marker_path.read_text())
         provider = json.loads((WORK / 'active-provider.json').read_text())['provider']
-        state_file = WORK / ('vast-deployment.json' if provider == 'vast' else 'deployment.json')
+        state_file = WORK / DEPLOYMENT_FILES[provider]
         state = json.loads(state_file.read_text())
-        machine_id = state.get('id') if provider == 'vast' else (state.get('pod') or {}).get('id')
+        machine_id = (state.get('pod') or {}).get('id') if provider == 'runpod' else state.get('id')
         return bool(machine_id and marker == {'provider': provider, 'id': str(machine_id)})
     except (OSError, ValueError, KeyError, TypeError):
         return False
