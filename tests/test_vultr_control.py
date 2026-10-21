@@ -67,13 +67,35 @@ class VultrTests(unittest.TestCase):
     def test_stop_deletes_only_tracked_instance(self):
         with tempfile.TemporaryDirectory() as directory:
             location = Path(directory) / 'deployment.json'
-            location.write_text(json.dumps({'id': 'tracked-id'}))
+            location.write_text(json.dumps({'id': 'tracked-id', 'label': 'cloud-gpu-studio-owned'}))
             with patch.object(vultr_control, 'STATE', location), \
                  patch.object(vultr_control, 'instance', side_effect=[{'id': 'tracked-id'}, None]), \
                  patch.object(vultr_control, 'request', return_value={}) as request:
                 vultr_control.stop()
                 request.assert_called_once_with('instances/tracked-id', method='DELETE')
                 self.assertEqual(json.loads(location.read_text()), {})
+
+    def test_mismatched_cloud_label_blocks_delete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            location = Path(directory) / 'deployment.json'
+            location.write_text(json.dumps({'id': 'existing-id',
+                                            'label': 'cloud-gpu-studio-owned'}))
+            with patch.object(vultr_control, 'STATE', location), \
+                 patch.object(vultr_control, 'request',
+                              return_value={'instance': {'id': 'existing-id',
+                                                         'label': 'my-permanent-server'}}) as request:
+                with self.assertRaises(vultr_control.OwnershipError):
+                    vultr_control.stop()
+                request.assert_called_once_with('instances/existing-id')
+
+    def test_empty_catalog_explains_memory_limit(self):
+        with patch.object(vultr_control, 'eligible_offers', return_value=[]), \
+             patch.object(vultr_control, 'selected_price_limit', return_value=None), \
+             patch.object(vultr_control, 'pages', return_value=[
+                 {'gpu_type': 'NVIDIA_L40S', 'gpu_count': 1, 'gpu_vram_gb': 48},
+                 {'gpu_type': 'NVIDIA_L40S', 'gpu_count': 2, 'gpu_vram_gb': 96}]):
+            with self.assertRaisesRegex(RuntimeError, '最高仅 48 GB'):
+                vultr_control.list_offers()
 
 
 if __name__ == '__main__':

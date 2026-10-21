@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -16,6 +17,10 @@ API = 'https://api.vultr.com/v2/'
 STATE = WORK / 'vultr-deployment.json'
 MIN_DISK_GB = 160
 MIN_VRAM_GB = 79
+
+
+class OwnershipError(RuntimeError):
+    """A local record must never authorize actions on an unrelated VM."""
 
 
 def state():
@@ -62,15 +67,23 @@ def pages(path, field):
 
 
 def instance():
-    machine_id = state().get('id')
+    saved = state()
+    machine_id = saved.get('id')
     if not machine_id:
         return None
+    expected_label = saved.get('label')
+    if not expected_label or not expected_label.startswith('cloud-gpu-studio-'):
+        raise OwnershipError('Vultr 本地记录缺少应用专属标识；为保护账户中的其他机器，已拒绝操作。')
     try:
-        return request('instances/' + str(machine_id)).get('instance')
+        current = request('instances/' + str(machine_id)).get('instance')
     except RuntimeError as error:
         if 'HTTP 404' in str(error):
             return None
         raise
+    if current and (str(current.get('id')) != str(machine_id) or
+                    current.get('label') != expected_label):
+        raise OwnershipError('Vultr 云端实例标识与本地记录不一致；已拒绝连接或删除。')
+    return current
 
 
 def status():
@@ -138,8 +151,21 @@ def eligible_offers(max_hourly=None):
 
 
 def list_offers():
+    limit = selected_price_limit()
+    offers = eligible_offers(limit)
+    if not offers:
+        plans = pages('plans?type=vcg', 'plans')
+        single = [item for item in plans if int(item.get('gpu_count') or 1) == 1 and
+                  not re.search(r'AMD|INSTINCT|RADEON|\bMI\d',
+                                str(item.get('gpu_type') or ''), re.I)]
+        max_vram = max((float(item.get('gpu_vram_gb') or 0) for item in single), default=0)
+        if max_vram < MIN_VRAM_GB:
+            raise RuntimeError(f'Vultr API Key 有效，但当前账户可见的单卡 Cloud GPU 最高仅 {max_vram:g} GB 显存；当前模型方案要求至少约 80 GB。多卡方案的显存不能直接相加供单个 ComfyUI 模型使用。')
+        if limit is not None:
+            raise RuntimeError('Vultr 当前没有价格上限内、且地区可部署的兼容单卡；可清空价格上限后重试。')
+        raise RuntimeError('Vultr 当前没有地区可部署的兼容单卡；请稍后查询或联系 Vultr 确认 GPU 配额。')
     return [{key: value for key, value in item.items() if key not in ('plan', 'region')}
-            for item in eligible_offers(selected_price_limit())]
+            for item in offers]
 
 
 def ensure_ssh_key():
@@ -228,15 +254,17 @@ def start():
         raise RuntimeError('选中的 Vultr 机型在该地区已不可用，请刷新报价。')
     key_id = ensure_ssh_key()
     os_id = ubuntu_os_id()
+    label = 'cloud-gpu-studio-' + secrets.token_hex(6)
     print(f"Creating Vultr {offer['gpu']} in {offer['region']} at ${offer['price']:.2f}/hour.", flush=True)
     created = request('instances', {'region': offer['region'], 'plan': offer['plan'],
-                                    'os_id': os_id, 'label': 'cloud-gpu-studio',
+                                    'os_id': os_id, 'label': label,
                                     'hostname': 'cloud-gpu-studio', 'sshkey_id': [key_id],
                                     'backups': 'disabled'}, 'POST').get('instance') or {}
     machine_id = created.get('id')
     if not machine_id:
         raise RuntimeError('Vultr did not return an instance ID; inspect the console before retrying.')
-    save_state({'id': machine_id, 'created_epoch': time.time(), 'cost_per_hour': offer['price'],
+    save_state({'id': machine_id, 'label': label, 'created_epoch': time.time(),
+                'cost_per_hour': offer['price'],
                 'max_hourly': limit, 'gpu_type': offer['gpu'], 'offer_id': offer['id'],
                 'model': json.loads(selected_manifest.read_text())})
     with (WORK / 'vultr-budget-guard.log').open('a') as log:
@@ -309,6 +337,9 @@ def guard():
                 request('instances/' + str(saved['id']), method='DELETE')
                 print('Budget guard deleted Vultr instance.', flush=True)
                 return
+        except OwnershipError as error:
+            print(str(error), flush=True)
+            return
         except Exception as error:
             print(str(error)[:300], flush=True)
         time.sleep(30)
@@ -325,10 +356,14 @@ def connect():
 
 
 if __name__ == '__main__':
-    command = sys.argv[1]
-    if command == 'status':
-        print(json.dumps(status()))
-    elif command == 'offers':
-        print(json.dumps(list_offers()))
-    else:
-        {'start': start, 'resume': resume, 'stop': stop, 'connect': connect, 'guard': guard}[command]()
+    try:
+        command = sys.argv[1]
+        if command == 'status':
+            print(json.dumps(status()))
+        elif command == 'offers':
+            print(json.dumps(list_offers()))
+        else:
+            {'start': start, 'resume': resume, 'stop': stop, 'connect': connect, 'guard': guard}[command]()
+    except Exception as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(1)
