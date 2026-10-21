@@ -1,4 +1,4 @@
-"""Disposable Vultr Cloud GPU instance for the local ComfyUI bridge."""
+"""Disposable Vultr GPU instance or GH200 server for the ComfyUI bridge."""
 import json
 import os
 import re
@@ -23,6 +23,15 @@ class OwnershipError(RuntimeError):
     """A local record must never authorize actions on an unrelated VM."""
 
 
+def resource_for(saved):
+    kind = saved.get('kind', 'cloud')
+    if kind == 'cloud':
+        return 'instances', 'instance'
+    if kind == 'metal':
+        return 'bare-metals', 'bare_metal'
+    raise OwnershipError('未知 Vultr 资源类型；为保护其他机器，已拒绝操作。')
+
+
 def state():
     return json.loads(STATE.read_text()) if STATE.exists() else {}
 
@@ -36,7 +45,7 @@ def request(path, data=None, method='GET'):
     if not key_file.exists():
         raise RuntimeError('请先在账户设置保存 Vultr API Key。')
     key = key_file.read_text().strip()
-    command = ['curl', '--silent', '--show-error', '--max-time', '45', '--config', '-',
+    command = ['curl', '-4', '--silent', '--show-error', '--max-time', '45', '--config', '-',
                '--request', method, API + path.lstrip('/'), '--write-out', '\n%{http_code}']
     if data is not None:
         command += ['--data', json.dumps(data)]
@@ -46,6 +55,10 @@ def request(path, data=None, method='GET'):
         raise RuntimeError(response.stderr.strip() or 'Vultr API connection failed.')
     body, code = response.stdout.rsplit('\n', 1)
     if not 200 <= int(code) < 300:
+        if code == '401' and 'Unauthorized IP address' in body:
+            address = (json.loads(body).get('error') or '').split(': ', 1)[-1]
+            raise RuntimeError('Vultr API 拒绝当前公网 IPv4 ' + address +
+                               '。请在 Vultr 控制台的 API Access Control 中将该地址加入允许列表。')
         # API errors can echo request information. Never show a credential-bearing body.
         raise RuntimeError('Vultr HTTP ' + code + ': ' + body[:300].replace(key, '[redacted]'))
     return json.loads(body) if body else {}
@@ -74,8 +87,9 @@ def instance():
     expected_label = saved.get('label')
     if not expected_label or not expected_label.startswith('cloud-gpu-studio-'):
         raise OwnershipError('Vultr 本地记录缺少应用专属标识；为保护账户中的其他机器，已拒绝操作。')
+    resource, field = resource_for(saved)
     try:
-        current = request('instances/' + str(machine_id)).get('instance')
+        current = request(resource + '/' + str(machine_id)).get(field)
     except RuntimeError as error:
         if 'HTTP 404' in str(error):
             return None
@@ -106,7 +120,8 @@ def selected_price_limit():
 
 
 def eligible_offers(max_hourly=None):
-    plans = pages('plans?type=vcg', 'plans')
+    plans = [{**item, '_kind': 'cloud'} for item in pages('plans?type=vcg', 'plans')]
+    plans += [{**item, '_kind': 'metal'} for item in pages('plans-metal', 'plans_metal')]
     regions = {item['id']: item for item in pages('regions', 'regions')}
     candidates = []
     for plan in plans:
@@ -116,7 +131,8 @@ def eligible_offers(max_hourly=None):
         price = float(plan.get('hourly_cost') or 0)
         gpu_count = int(plan.get('gpu_count') or 1)
         gpu_brand = str(plan.get('gpu_brand') or '')
-        if (not gpu_name or re.search(r'AMD|INSTINCT|RADEON|\bMI\d',
+        if (not gpu_name or plan.get('deploy_ondemand') is False or
+                re.search(r'AMD|INSTINCT|RADEON|\bMI\d',
                                    gpu_name + ' ' + gpu_brand, re.I) or
                 vram < MIN_VRAM_GB or disk < MIN_DISK_GB or
                 gpu_count != 1 or price <= 0 or (max_hourly is not None and price > max_hourly)):
@@ -124,26 +140,31 @@ def eligible_offers(max_hourly=None):
         candidates.append(plan)
     # Vultr sometimes returns empty plan.locations even though regional
     # availability is populated. Fall back to the authoritative region API.
-    regional_plans = {}
-    if candidates and not any(plan.get('locations') for plan in candidates):
+    regional_plans = {'cloud': {}, 'metal': {}}
+    for kind, api_type in (('cloud', 'vcg'), ('metal', 'vbm')):
+        subset = [plan for plan in candidates if plan['_kind'] == kind]
+        if not subset or all(plan.get('locations') for plan in subset):
+            continue
         def available(region_id):
-            data = request('regions/' + quote(region_id, safe='') + '/availability')
+            data = request('regions/' + quote(region_id, safe='') +
+                           '/availability?type=' + api_type)
             return region_id, set(data.get('available_plans') or [])
         with ThreadPoolExecutor(max_workers=6) as pool:
-            regional_plans = dict(pool.map(available, regions))
+            regional_plans[kind] = dict(pool.map(available, regions))
     offers = []
     for plan in candidates:
         gpu_name = str(plan.get('gpu_type') or '')
         vram = float(plan.get('gpu_vram_gb') or plan.get('gpu_vram') or 0)
         disk = float(plan.get('disk') or 0)
         price = float(plan.get('hourly_cost') or 0)
+        kind = plan['_kind']
         locations = plan.get('locations') or [region_id for region_id, available in
-                                              regional_plans.items() if plan['id'] in available]
+                                              regional_plans[kind].items() if plan['id'] in available]
         for region_id in locations:
             region = regions.get(region_id)
             if not region:
                 continue
-            offers.append({'id': f"{plan['id']}@{region_id}", 'plan': plan['id'],
+            offers.append({'id': f"{plan['id']}@{region_id}", 'plan': plan['id'], 'kind': kind,
                            'region': region_id, 'gpu': gpu_name, 'price': price,
                            'location': str(region.get('city') or region_id),
                            'vramGb': vram, 'diskGb': disk, 'reliability': None})
@@ -151,9 +172,15 @@ def eligible_offers(max_hourly=None):
 
 
 def list_offers():
+    request('account')  # Plan catalogs are public; validate the configured key first.
     limit = selected_price_limit()
     offers = eligible_offers(limit)
     if not offers:
+        metal = pages('plans-metal', 'plans_metal')
+        gh200 = next((item for item in metal if item.get('gpu_type') == 'NVIDIA_GH200'
+                      and int(item.get('gpu_count') or 1) == 1), None)
+        if gh200 and gh200.get('deploy_ondemand') is False:
+            raise RuntimeError('Vultr 的 Bare Metal 目录列有单卡 GH200（96 GB），但这条方案标记为不可按需部署；Cloud GPU 目录当前也没有返回可用的同型号方案。请在控制台确认 GH200 的地区和部署资格；应用不会改选其他机器。')
         plans = pages('plans?type=vcg', 'plans')
         single = [item for item in plans if int(item.get('gpu_count') or 1) == 1 and
                   not re.search(r'AMD|INSTINCT|RADEON|\bMI\d',
@@ -164,7 +191,7 @@ def list_offers():
         if limit is not None:
             raise RuntimeError('Vultr 当前没有价格上限内、且地区可部署的兼容单卡；可清空价格上限后重试。')
         raise RuntimeError('Vultr 当前没有地区可部署的兼容单卡；请稍后查询或联系 Vultr 确认 GPU 配额。')
-    return [{key: value for key, value in item.items() if key not in ('plan', 'region')}
+    return [{key: value for key, value in item.items() if key not in ('plan', 'region', 'kind')}
             for item in offers]
 
 
@@ -179,18 +206,27 @@ def ensure_ssh_key():
     return created['ssh_key']['id']
 
 
-def ubuntu_os_id():
+def ubuntu_os_id(gpu_name=''):
+    arm = 'GH200' in gpu_name.upper()
     systems = pages('os', 'os')
     for version in ('24.04', '22.04'):
-        candidates = [item for item in systems if
-                      re.search(r'Ubuntu\s+' + re.escape(version) + r'\b',
-                                str(item.get('name') or ''), re.I)
-                      and 'x64' in str(item.get('name') or '')]
+        candidates = []
+        for item in systems:
+            name = str(item.get('name') or '')
+            arch = str(item.get('arch') or name)
+            if not re.search(r'Ubuntu\s+' + re.escape(version) + r'\b', name, re.I):
+                continue
+            if arm and re.search(r'arm64|aarch64', name + ' ' + arch, re.I):
+                candidates.append(item)
+            elif not arm and (arch.lower() in ('x64', 'x86_64') or
+                              re.search(r'\bx64\b', name, re.I)):
+                candidates.append(item)
         if candidates:
             candidates.sort(key=lambda item: 0 if re.search(
                 r'gpu|nvidia', str(item.get('name') or ''), re.I) else 1)
             return candidates[0]['id']
-    raise RuntimeError('Vultr 没有返回支持的 Ubuntu 22.04/24.04 x64 镜像。')
+    arch = 'ARM64' if arm else 'x64'
+    raise RuntimeError(f'Vultr 未返回适用于 {gpu_name or "此机型"} 的 Ubuntu 22.04/24.04 {arch} 镜像；已停止创建，避免产生无法启动的计费机器。')
 
 
 def ssh_info(current):
@@ -240,6 +276,7 @@ def deploy_existing(info):
 
 
 def start():
+    request('account')
     if instance():
         raise RuntimeError('Vultr machine already exists; connect it instead.')
     selected_manifest = manifest()
@@ -249,21 +286,30 @@ def start():
     offer = next((item for item in offers if item['id'] == selected_id), None) if selected_id else None
     if not offer:
         raise RuntimeError('请刷新 Vultr 报价并选择一台机器；所选方案可能已下架或涨价。')
-    available = request('regions/' + quote(offer['region'], safe='') + '/availability').get('available_plans') or []
+    api_type = 'vbm' if offer['kind'] == 'metal' else 'vcg'
+    available = request('regions/' + quote(offer['region'], safe='') +
+                        '/availability?type=' + api_type).get('available_plans') or []
     if offer['plan'] not in available:
         raise RuntimeError('选中的 Vultr 机型在该地区已不可用，请刷新报价。')
+    os_id = ubuntu_os_id(offer['gpu'])
     key_id = ensure_ssh_key()
-    os_id = ubuntu_os_id()
     label = 'cloud-gpu-studio-' + secrets.token_hex(6)
     print(f"Creating Vultr {offer['gpu']} in {offer['region']} at ${offer['price']:.2f}/hour.", flush=True)
-    created = request('instances', {'region': offer['region'], 'plan': offer['plan'],
-                                    'os_id': os_id, 'label': label,
-                                    'hostname': 'cloud-gpu-studio', 'sshkey_id': [key_id],
-                                    'backups': 'disabled'}, 'POST').get('instance') or {}
+    payload = {'region': offer['region'], 'plan': offer['plan'], 'os_id': os_id,
+               'label': label, 'hostname': 'cloud-gpu-studio'}
+    if offer['kind'] == 'metal':
+        payload['ssh_key_ids'] = [key_id]
+        resource, field = 'bare-metals', 'bare_metal'
+    else:
+        payload['sshkey_id'] = [key_id]
+        payload['backups'] = 'disabled'
+        resource, field = 'instances', 'instance'
+    created = request(resource, payload, 'POST').get(field) or {}
     machine_id = created.get('id')
     if not machine_id:
         raise RuntimeError('Vultr did not return an instance ID; inspect the console before retrying.')
-    save_state({'id': machine_id, 'label': label, 'created_epoch': time.time(),
+    save_state({'id': machine_id, 'kind': offer['kind'], 'label': label,
+                'created_epoch': time.time(),
                 'cost_per_hour': offer['price'],
                 'max_hourly': limit, 'gpu_type': offer['gpu'], 'offer_id': offer['id'],
                 'model': json.loads(selected_manifest.read_text())})
@@ -305,13 +351,15 @@ def resume():
 
 
 def stop():
-    machine_id = state().get('id')
+    saved = state()
+    machine_id = saved.get('id')
     if not machine_id:
         print('No tracked Vultr instance.', flush=True)
         return
+    resource, _ = resource_for(saved)
     if instance():
         try:
-            request('instances/' + str(machine_id), method='DELETE')
+            request(resource + '/' + str(machine_id), method='DELETE')
         except RuntimeError as error:
             if 'HTTP 404' not in str(error):
                 raise
@@ -328,13 +376,14 @@ def guard():
     saved = state()
     if not saved.get('id'):
         return
+    resource, _ = resource_for(saved)
     while True:
         try:
             if state().get('id') != saved['id'] or instance() is None:
                 return
             elapsed = time.time() - saved['created_epoch']
             if elapsed * saved['cost_per_hour'] / 3600 >= 9 or elapsed >= 3 * 3600:
-                request('instances/' + str(saved['id']), method='DELETE')
+                request(resource + '/' + str(saved['id']), method='DELETE')
                 print('Budget guard deleted Vultr instance.', flush=True)
                 return
         except OwnershipError as error:
