@@ -521,6 +521,23 @@ fn connect_tunnel(app: &AppHandle, controller: &Controller) -> Result<(), String
     Err(format!("SSH 隧道未能连接。请查看 {}", log_path.display()))
 }
 
+#[cfg(target_os = "macos")]
+fn notify_cloud_ready() {
+    thread::spawn(|| {
+        let notification = Command::new("/usr/bin/osascript")
+            .args(["-e", "display notification \"GPU 与 ComfyUI 已就绪，可以开始创作。 / GPU and ComfyUI are ready.\" with title \"Cloud GPU Studio\""])
+            .stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        let sound = Command::new("/usr/bin/afplay")
+            .arg("/System/Library/Sounds/Glass.aiff")
+            .stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        if let Ok(mut child) = notification { let _ = child.wait(); }
+        if let Ok(mut child) = sound { let _ = child.wait(); }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn notify_cloud_ready() {}
+
 fn start_local(app: &AppHandle, controller: &Controller, deployment_progress: bool) -> Result<(), String> {
     if port_open(8188) {
         if deployment_progress {
@@ -894,6 +911,7 @@ fn launch(app: AppHandle, controller: State<'_, Arc<Controller>>,
             local_worker.join().map_err(|_| "本地 ComfyUI 启动任务异常终止")??;
             if shared.cancelling.load(Ordering::SeqCst) { return Ok(()); }
             emit(&app, "ready", "云端已连接，ComfyUI 可以使用了。", 100, None, "success");
+            notify_cloud_ready();
             Ok(())
         })();
         shared.launching.store(false, Ordering::SeqCst);
