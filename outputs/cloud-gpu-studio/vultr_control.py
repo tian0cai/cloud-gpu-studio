@@ -313,11 +313,8 @@ def start():
                 'cost_per_hour': offer['price'],
                 'max_hourly': limit, 'gpu_type': offer['gpu'], 'offer_id': offer['id'],
                 'model': json.loads(selected_manifest.read_text())})
-    with (WORK / 'vultr-budget-guard.log').open('a') as log:
-        subprocess.Popen([sys.executable, '-u', __file__, 'guard'], cwd=BASE,
-                         stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
     # Keep an allocated machine if installation fails so the user can inspect
-    # and explicitly delete it; the background cost guard remains active.
+    # and explicitly delete it.
     for _ in range(90):
         current = instance()
         info = ssh_info(current)
@@ -372,28 +369,6 @@ def stop():
     raise RuntimeError('Vultr deletion has not completed; check the console.')
 
 
-def guard():
-    saved = state()
-    if not saved.get('id'):
-        return
-    resource, _ = resource_for(saved)
-    while True:
-        try:
-            if state().get('id') != saved['id'] or instance() is None:
-                return
-            elapsed = time.time() - saved['created_epoch']
-            if elapsed * saved['cost_per_hour'] / 3600 >= 9 or elapsed >= 3 * 3600:
-                request(resource + '/' + str(saved['id']), method='DELETE')
-                print('Budget guard deleted Vultr instance.', flush=True)
-                return
-        except OwnershipError as error:
-            print(str(error), flush=True)
-            return
-        except Exception as error:
-            print(str(error)[:300], flush=True)
-        time.sleep(30)
-
-
 def connect():
     current = instance()
     info = ssh_info(current)
@@ -412,7 +387,7 @@ if __name__ == '__main__':
         elif command == 'offers':
             print(json.dumps(list_offers()))
         else:
-            {'start': start, 'resume': resume, 'stop': stop, 'connect': connect, 'guard': guard}[command]()
+            {'start': start, 'resume': resume, 'stop': stop, 'connect': connect}[command]()
     except Exception as error:
         print(str(error), file=sys.stderr)
         raise SystemExit(1)

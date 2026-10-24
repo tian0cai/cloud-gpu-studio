@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Create a disposable RunPod GPU, bootstrap it, and connect through SSH."""
 import argparse
-import datetime
 import json
 import os
 import subprocess
@@ -114,27 +113,6 @@ def stop():
     raise RuntimeError('Deletion has not completed; check RunPod console and run status again.')
 
 
-def guard():
-    s = state()
-    pid = s['pod']['id']
-    while True:
-        try:
-            pod = find_pod(pid)
-            if pod is None:
-                return
-            balance = gql('query { myself { clientBalance } }')['myself']['clientBalance']
-            limit = s.get('max_hourly')
-            if (time.time() >= s['created_epoch'] + 10800
-                    or balance <= s['initial_balance'] - 9
-                    or (limit is not None and float(pod.get('costPerHr') or 0) > limit)):
-                request('pods/' + pid, method='DELETE')
-                print('Guard deleted the Pod and disposable volume.', flush=True)
-                return
-        except Exception as error:
-            print(str(error)[:300], flush=True)
-        time.sleep(30)
-
-
 def graphql_value(value):
     if isinstance(value, dict):
         return '{' + ', '.join(k + ': ' + graphql_value(v) for k, v in value.items()) + '}'
@@ -220,7 +198,6 @@ def start():
     if balance < 10:
         raise RuntimeError('Less than $10 remains; check the RunPod account first.')
     created = time.time()
-    deadline = datetime.datetime.fromtimestamp(created + 10800, datetime.timezone.utc).isoformat()
     ensure_ssh_key()
     public_key = (SECRETS / 'runpod_ed25519.pub').read_text().strip()
     max_hourly = selected_price_limit()
@@ -245,7 +222,7 @@ def start():
             'containerDiskInGb': CONTAINER_DISK_GB, 'volumeInGb': VOLUME_GB, 'volumeMountPath': '/workspace',
             'minMemoryInGb': 96, 'minVcpuCount': MIN_VCPU_COUNT, 'name': 'cloud-gpu-studio-disposable',
             'imageName': IMAGE, 'ports': '22/tcp', 'startSsh': True, 'startJupyter': False,
-            'supportPublicIp': True, 'terminateAfter': deadline,
+            'supportPublicIp': True,
             'env': [{'key': 'PUBLIC_KEY', 'value': public_key}],
         }
         body = graphql_value(args).replace('cloudType: "SECURE"', 'cloudType: SECURE')
@@ -265,16 +242,13 @@ def start():
         raise RuntimeError('当前没有可创建的 RunPod 80 GB 显卡。' if max_hourly is None else
                            '当前价格上限内没有可创建的 RunPod 80 GB 显卡。')
     s.update(pod=pod, created_epoch=created, initial_balance=balance, gpu_type=gpu, data_center_id=dc,
-             deadline=deadline, quote=quote, storage_mode='disposable', volume_size_gb=VOLUME_GB,
+             quote=quote, storage_mode='disposable', volume_size_gb=VOLUME_GB,
              max_hourly=max_hourly)
     save_state(s)
     if max_hourly is not None and float(pod['costPerHr']) > max_hourly:
         stop()
         raise RuntimeError('RunPod 实际价格超过所选上限，已删除机器以避免超额计费。')
     try:
-        with (WORK / 'budget-guard.log').open('a') as log:
-            subprocess.Popen([sys.executable, '-u', __file__, 'guard'], cwd=BASE,
-                             stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
         print(f"Created {pod['id']} at ${pod['costPerHr']}/hour; waiting for SSH.", flush=True)
         for _ in range(90):
             info = ssh_info(pod['id'])
@@ -298,7 +272,7 @@ def start():
         subprocess.run(ssh_command(info, 'bash /workspace/bootstrap/setup_remote.sh'), check=True, timeout=9000)
         print('Cloud ComfyUI is ready. Opening the SSH tunnel now.', flush=True)
     except BaseException:
-        print('Deployment did not finish. The Pod remains available for resume or explicit deletion; the budget guard is still active.', flush=True)
+        print('Deployment did not finish. The Pod remains available for resume or explicit deletion.', flush=True)
         raise
 
 
@@ -349,7 +323,7 @@ def connect():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Disposable RunPod GPU deployment')
-    parser.add_argument('command', choices=['status', 'offers', 'start', 'resume', 'stop', 'connect', 'guard'])
+    parser.add_argument('command', choices=['status', 'offers', 'start', 'resume', 'stop', 'connect'])
     command = parser.parse_args().command
     if command == 'status':
         s = state()
@@ -362,4 +336,4 @@ if __name__ == '__main__':
     elif command == 'offers':
         print(json.dumps(offer_catalog(selected_price_limit())))
     else:
-        {'start': start, 'resume': resume, 'stop': stop, 'connect': connect, 'guard': guard}[command]()
+        {'start': start, 'resume': resume, 'stop': stop, 'connect': connect}[command]()

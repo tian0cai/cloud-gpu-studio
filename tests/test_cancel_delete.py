@@ -30,19 +30,21 @@ class ConcurrentDeleteTests(unittest.TestCase):
                  patch.object(runpod_control, 'current_pod', return_value=None), \
                  patch.object(runpod_control, 'gql', side_effect=[
                      {'myself': {'clientBalance': 120}},
-                     {'podFindAndDeployOnDemand': created}]), \
+                     {'podFindAndDeployOnDemand': created}]) as gql, \
                  patch.object(runpod_control, 'ensure_ssh_key'), \
                  patch.object(runpod_control, 'selected_price_limit', return_value=8.99), \
                  patch.object(runpod_control, 'offer_catalog', return_value=[offer]), \
                  patch.object(runpod_control, 'quote_gpu', return_value={
                      'uninterruptablePrice': 8.99, 'stockStatus': 'Low'}), \
                  patch.object(runpod_control, 'save_state') as save, \
-                 patch.object(runpod_control.subprocess, 'Popen'), \
+                 patch.object(runpod_control.subprocess, 'Popen') as background_process, \
                  patch.object(runpod_control, 'ssh_info', side_effect=RuntimeError('SSH failed')), \
                  patch.object(runpod_control, 'stop') as stop:
                 with self.assertRaisesRegex(RuntimeError, 'SSH failed'):
                     runpod_control.start()
                 stop.assert_not_called()
+                background_process.assert_not_called()
+                self.assertNotIn('terminateAfter', gql.call_args_list[1].args[0])
                 self.assertEqual(save.call_args.args[0]['pod']['id'], 'pod-1')
 
     def test_runpod_already_deleted_after_lookup(self):

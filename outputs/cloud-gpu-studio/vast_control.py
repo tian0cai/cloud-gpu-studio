@@ -306,9 +306,6 @@ def start():
          'gpu_type': offer['gpu_name'], 'offer_id': offer['id'], 'model': json.loads(selected_manifest.read_text())}
     save_state(s)
     try:
-        with (WORK / 'vast-budget-guard.log').open('a') as log:
-            subprocess.Popen([sys.executable, '-u', __file__, 'guard'], cwd=BASE,
-                             stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
         print(f'Created Vast.ai instance {instance_id}; waiting for direct SSH.', flush=True)
         for _ in range(90):
             current = instance()
@@ -386,30 +383,6 @@ def stop():
     raise RuntimeError('Vast.ai deletion has not completed; check the console.')
 
 
-def guard():
-    s = state()
-    if not s.get('id'):
-        return
-    while True:
-        try:
-            current = instance()
-            if current is None:
-                return
-            elapsed = time.time() - s['created_epoch']
-            price = float(current.get('dph_total') or s['cost_per_hour'])
-            balance = available_funds()
-            spent = s['initial_balance'] - balance
-            limit = s.get('max_hourly')
-            if (spent >= 9 or elapsed * price / 3600 >= 9
-                    or (limit is not None and price > limit * PRICE_TOLERANCE)):
-                request('instances/' + str(s['id']) + '/', method='DELETE')
-                print('Budget guard deleted Vast.ai instance.', flush=True)
-                return
-        except Exception as error:
-            print(str(error)[:300], flush=True)
-        time.sleep(30)
-
-
 def connect():
     current = instance()
     if not current:
@@ -429,4 +402,4 @@ if __name__ == '__main__':
     elif command == 'offers':
         print(json.dumps(list_offers()))
     else:
-        {'start': start, 'resume': resume, 'stop': stop, 'connect': connect, 'guard': guard}[command]()
+        {'start': start, 'resume': resume, 'stop': stop, 'connect': connect}[command]()
