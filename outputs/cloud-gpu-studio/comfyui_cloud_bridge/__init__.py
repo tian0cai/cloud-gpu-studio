@@ -165,7 +165,10 @@ class RemoteClient:
         self.session.trust_env = False
 
     def request(self, method, path, **kwargs):
-        response = self.session.request(method, ENDPOINT + path, timeout=(10, 120), **kwargs)
+        try:
+            response = self.session.request(method, ENDPOINT + path, timeout=(10, 120), **kwargs)
+        except requests.exceptions.ConnectionError as error:
+            raise RuntimeError('云端 ComfyUI 尚未连接。请等待 Cloud GPU Studio 主窗口显示“云端已连接”，再执行工作流；若机器已启动，请在主窗口重新连接。') from error
         if not response.ok:
             raise RuntimeError(f'Cloud GPU HTTP {response.status_code}: {response.text[:2000]}')
         return response

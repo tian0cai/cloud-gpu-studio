@@ -15,7 +15,25 @@ python -u /workspace/bootstrap/download_models.py \
 download_pid=$!
 trap 'kill "$download_pid" 2>/dev/null || true' EXIT
 echo 'Installing Python dependencies...'
-python -m venv --system-site-packages /workspace/comfy-env
+# Models need the persistent workspace, but a Python environment creates many
+# small files. On network-backed workspaces that can stall installation for
+# tens of minutes. Keep the environment on the container's local disk when it
+# has enough room, while preserving the path used by the rest of the scripts.
+if [ -L /workspace/comfy-env ] && [ ! -e /workspace/comfy-env ]; then
+  rm /workspace/comfy-env
+fi
+if [ ! -e /workspace/comfy-env ]; then
+  local_free_kb=$(df -Pk / | awk 'NR == 2 {print $4}')
+  if [ "${local_free_kb:-0}" -ge 12582912 ]; then
+    mkdir -p /opt/cloud-gpu-studio
+    python -m venv --system-site-packages /opt/cloud-gpu-studio/comfy-env
+    ln -s /opt/cloud-gpu-studio/comfy-env /workspace/comfy-env
+    echo 'Python environment is on local container storage.'
+  else
+    python -m venv --system-site-packages /workspace/comfy-env
+    echo 'Local container storage is below 12 GB; Python environment is on /workspace.'
+  fi
+fi
 /workspace/comfy-env/bin/python -m pip install -r requirements.txt > /workspace/logs/install.log 2>&1 &
 pip_pid=$!
 install_started=$(date +%s)

@@ -1,6 +1,7 @@
 """Deletion stays safe when two cleanup paths race on the same machine."""
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,37 @@ import vast_control
 
 
 class ConcurrentDeleteTests(unittest.TestCase):
+    def test_runpod_install_failure_preserves_created_machine(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'runpod_ed25519.pub').write_text('ssh-ed25519 test')
+            manifest = root / 'models.lock.json'
+            manifest.write_text('{"files": []}')
+            offer = {'id': 'offer-1', 'gpu': 'NVIDIA B300 SXM6 AC', 'location': 'EUR-IS-1'}
+            created = {'id': 'pod-1', 'costPerHr': 8.99, 'desiredStatus': 'RUNNING'}
+            with patch.dict(runpod_control.os.environ, {'CLOUD_GPU_STUDIO_OFFER_ID': 'offer-1'}), \
+                 patch.object(runpod_control, 'WORK', root), \
+                 patch.object(runpod_control, 'SECRETS', root), \
+                 patch.object(runpod_control, 'state', return_value={}), \
+                 patch.object(runpod_control, 'manifest', return_value=manifest), \
+                 patch.object(runpod_control, 'current_pod', return_value=None), \
+                 patch.object(runpod_control, 'gql', side_effect=[
+                     {'myself': {'clientBalance': 120}},
+                     {'podFindAndDeployOnDemand': created}]), \
+                 patch.object(runpod_control, 'ensure_ssh_key'), \
+                 patch.object(runpod_control, 'selected_price_limit', return_value=8.99), \
+                 patch.object(runpod_control, 'offer_catalog', return_value=[offer]), \
+                 patch.object(runpod_control, 'quote_gpu', return_value={
+                     'uninterruptablePrice': 8.99, 'stockStatus': 'Low'}), \
+                 patch.object(runpod_control, 'save_state') as save, \
+                 patch.object(runpod_control.subprocess, 'Popen'), \
+                 patch.object(runpod_control, 'ssh_info', side_effect=RuntimeError('SSH failed')), \
+                 patch.object(runpod_control, 'stop') as stop:
+                with self.assertRaisesRegex(RuntimeError, 'SSH failed'):
+                    runpod_control.start()
+                stop.assert_not_called()
+                self.assertEqual(save.call_args.args[0]['pod']['id'], 'pod-1')
+
     def test_runpod_already_deleted_after_lookup(self):
         with patch.object(runpod_control, 'state', return_value={'pod': {'id': 'pod-1'}}), \
              patch.object(runpod_control, 'current_pod', side_effect=[{'id': 'pod-1'}, None]), \

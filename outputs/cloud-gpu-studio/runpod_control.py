@@ -268,9 +268,10 @@ def start():
              deadline=deadline, quote=quote, storage_mode='disposable', volume_size_gb=VOLUME_GB,
              max_hourly=max_hourly)
     save_state(s)
+    if max_hourly is not None and float(pod['costPerHr']) > max_hourly:
+        stop()
+        raise RuntimeError('RunPod 实际价格超过所选上限，已删除机器以避免超额计费。')
     try:
-        if max_hourly is not None and float(pod['costPerHr']) > max_hourly:
-            raise RuntimeError('RunPod 实际价格超过所选上限，正在删除机器。')
         with (WORK / 'budget-guard.log').open('a') as log:
             subprocess.Popen([sys.executable, '-u', __file__, 'guard'], cwd=BASE,
                              stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
@@ -297,7 +298,7 @@ def start():
         subprocess.run(ssh_command(info, 'bash /workspace/bootstrap/setup_remote.sh'), check=True, timeout=9000)
         print('Cloud ComfyUI is ready. Opening the SSH tunnel now.', flush=True)
     except BaseException:
-        stop()
+        print('Deployment did not finish. The Pod remains available for resume or explicit deletion; the budget guard is still active.', flush=True)
         raise
 
 
