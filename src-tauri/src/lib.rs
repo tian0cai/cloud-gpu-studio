@@ -521,6 +521,56 @@ fn connect_tunnel(app: &AppHandle, controller: &Controller) -> Result<(), String
     Err(format!("SSH 隧道未能连接。请查看 {}", log_path.display()))
 }
 
+fn tunnel_monitor(app: AppHandle, controller: Arc<Controller>) {
+    thread::spawn(move || {
+        let mut reconnect = false;
+        loop {
+            thread::sleep(Duration::from_secs(10));
+            if let Ok(mut tunnel) = controller.tunnel.lock() {
+                if let Some(child) = tunnel.as_mut() {
+                    if child.try_wait().ok().flatten().is_some() {
+                        tunnel.take();
+                        reconnect = true;
+                    }
+                }
+            }
+            if !reconnect { continue; }
+            if port_open(8189) {
+                reconnect = false;
+                continue;
+            }
+            if controller.launching.load(Ordering::SeqCst) || begin(&controller).is_err() {
+                continue;
+            }
+            let result = match cloud_exists() {
+                Ok(true) => connect_tunnel(&app, &controller),
+                Ok(false) => {
+                    reconnect = false;
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            };
+            controller.busy.store(false, Ordering::SeqCst);
+            match result {
+                Ok(()) if !reconnect => {},
+                Ok(()) => {
+                    reconnect = false;
+                    emit(&app, "tunnel", "SSH 隧道已自动重新连接。", 100, None, "success");
+                }
+                Err(error) => {
+                    if let Ok(mut tunnel) = controller.tunnel.lock() {
+                        if let Some(mut child) = tunnel.take() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                    }
+                    eprintln!("SSH tunnel reconnect failed: {error}");
+                }
+            }
+        }
+    });
+}
+
 #[cfg(target_os = "macos")]
 fn notify_cloud_ready() {
     thread::spawn(|| {
@@ -1061,7 +1111,8 @@ pub fn run() {
         .setup(|app| {
             let controller = app.state::<Arc<Controller>>().inner().clone();
             let guard = app.state::<Arc<Mutex<IdleGuard>>>().inner().clone();
-            idle_monitor(app.handle().clone(), controller, guard);
+            idle_monitor(app.handle().clone(), controller.clone(), guard);
+            tunnel_monitor(app.handle().clone(), controller);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![get_status, get_settings, save_settings,

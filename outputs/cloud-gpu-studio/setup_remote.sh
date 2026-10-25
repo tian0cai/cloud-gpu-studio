@@ -10,7 +10,16 @@ cd /workspace/ComfyUI
 git checkout a5e95e675a6cd5f082965676d3fe9e7c99832024
 
 echo 'Downloading and verifying pinned model files in parallel with dependency installation...'
-python -u /workspace/bootstrap/download_models.py \
+mkdir -p /opt/cloud-gpu-studio
+if [ ! -x /opt/cloud-gpu-studio/hf-download-env/bin/python ]; then
+  python -m venv /opt/cloud-gpu-studio/hf-download-env
+fi
+if ! /opt/cloud-gpu-studio/hf-download-env/bin/python -m pip install --disable-pip-version-check \
+  'huggingface_hub>=1,<3' 'hf_xet>=1.7,<2' > /workspace/logs/hf-download-install.log 2>&1; then
+  tail -80 /workspace/logs/hf-download-install.log
+  exit 1
+fi
+HF_XET_HIGH_PERFORMANCE=1 /opt/cloud-gpu-studio/hf-download-env/bin/python -u /workspace/bootstrap/download_models.py \
   /workspace/bootstrap/models.lock.json /workspace/ComfyUI/models &
 download_pid=$!
 trap 'kill "$download_pid" 2>/dev/null || true' EXIT

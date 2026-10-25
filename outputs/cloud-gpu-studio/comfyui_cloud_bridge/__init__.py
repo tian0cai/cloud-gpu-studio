@@ -159,16 +159,28 @@ def video_mode():
     return json.loads(path.read_text()).get('video_mode', 'ref2va') if path.exists() else 'ref2va'
 
 
+class CloudConnectionError(RuntimeError):
+    """A temporary failure reaching the SSH-forwarded cloud ComfyUI."""
+
+
 class RemoteClient:
     def __init__(self):
         self.session = requests.Session()
         self.session.trust_env = False
 
     def request(self, method, path, **kwargs):
-        try:
-            response = self.session.request(method, ENDPOINT + path, timeout=(10, 120), **kwargs)
-        except requests.exceptions.ConnectionError as error:
-            raise RuntimeError('云端 ComfyUI 尚未连接。请等待 Cloud GPU Studio 主窗口显示“云端已连接”，再执行工作流；若机器已启动，请在主窗口重新连接。') from error
+        # GETs are safe to repeat while the desktop app reopens a dropped SSH
+        # tunnel. Do not repeat POST /prompt here: that could create two jobs.
+        attempts = 6 if method.upper() == 'GET' else 1
+        for attempt in range(attempts):
+            try:
+                response = self.session.request(method, ENDPOINT + path,
+                                                timeout=(10, 120), **kwargs)
+                break
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as error:
+                if attempt + 1 == attempts:
+                    raise CloudConnectionError('云端 ComfyUI 连接中断或请求超时，请检查 SSH 隧道。') from error
+                time.sleep(5)
         if not response.ok:
             raise RuntimeError(f'Cloud GPU HTTP {response.status_code}: {response.text[:2000]}')
         return response
@@ -180,7 +192,16 @@ class RemoteClient:
         pixels = np.clip(image[0].cpu().numpy() * 255, 0, 255).astype(np.uint8)
         Image.fromarray(pixels).save(buffer, format='PNG')
         filename = f'local_{uuid.uuid4().hex}.png'
-        data = self.request('POST', '/upload/image', files={'image': (filename, buffer.getvalue(), 'image/png')}, data={'type': 'input'}).json()
+        for attempt in range(3):
+            try:
+                data = self.request('POST', '/upload/image',
+                                    files={'image': (filename, buffer.getvalue(), 'image/png')},
+                                    data={'type': 'input'}).json()
+                break
+            except CloudConnectionError:
+                if attempt == 2:
+                    raise
+                time.sleep(5)
         return '/'.join(filter(None, [data.get('subfolder'), data['name']]))
 
     def run(self, graph, extension, steps, node_id=None):

@@ -63,12 +63,20 @@ def prepare_mode(mode):
     manifest_file = WORK / (mode + '-download.lock.json')
     manifest_file.write_text(json.dumps({'files': files}) + '\n')
     manifest_file.chmod(0o600)
-    print(f'Uploading pinned {mode.upper()} manifest...', flush=True)
+    print(f'Uploading pinned {mode.upper()} manifest and current downloader...', flush=True)
     subprocess.run(['scp', *info['options'], '-P', info['port'], str(manifest_file),
-                    info['host'] + f':/workspace/bootstrap/{mode}-download.lock.json'], check=True)
+                    str(HERE / 'download_models.py'), info['host'] + ':/workspace/bootstrap/'], check=True)
     print(f'Downloading and verifying {mode.upper()} model while current mode stays available...', flush=True)
+    download_python = '/opt/cloud-gpu-studio/hf-download-env/bin/python'
+    prepare_downloader = (
+        'mkdir -p /opt/cloud-gpu-studio && '
+        f'(test -x {download_python} || python -m venv /opt/cloud-gpu-studio/hf-download-env) && '
+        f'({download_python} -c "import huggingface_hub, hf_xet" || '
+        f'{download_python} -m pip install --disable-pip-version-check '
+        "'huggingface_hub>=1,<3' 'hf_xet>=1.7,<2') && "
+    )
     subprocess.run(control.ssh_command(info,
-                   'python -u /workspace/bootstrap/download_models.py '
+                   prepare_downloader + f'HF_XET_HIGH_PERFORMANCE=1 {download_python} -u /workspace/bootstrap/download_models.py '
                    f'/workspace/bootstrap/{mode}-download.lock.json /workspace/ComfyUI/models'),
                    check=True, timeout=9000)
     marker = {'provider': chosen, 'id': str(machine_id)}

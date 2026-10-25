@@ -1,56 +1,95 @@
+"""Download pinned model files with Hugging Face Xet and verify their bytes."""
+
 import concurrent.futures
 import hashlib
 import json
 import os
-import subprocess
 import sys
-import time
 from pathlib import Path
+
+from huggingface_hub import hf_hub_download
+
+
+def staging_path(item, root):
+    identity = f"{item['repo']}\0{item['revision']}\0{item['filename']}"
+    directory = hashlib.sha256(identity.encode()).hexdigest()[:20]
+    return root / '.cloud-gpu-downloads' / directory
+
+
+def verify(path, item):
+    if path.stat().st_size != item['size']:
+        raise RuntimeError('Size mismatch: ' + str(path))
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(16 * 1024 * 1024), b''):
+            digest.update(block)
+    if digest.hexdigest() != item['sha256']:
+        raise RuntimeError('Checksum mismatch: ' + str(path))
 
 
 def download(item, root):
     dest = root / item['destination']
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if not dest.exists() or dest.stat().st_size != item['size']:
-        partial = dest.with_name(dest.name + '.part')
-        url = 'https://huggingface.co/' + item['repo'] + '/resolve/' + item['revision'] + '/' + item['filename']
-        print('Downloading ' + item['destination'], flush=True)
-        subprocess.run(['curl', '-fsSL', '--retry', '5', '--retry-delay', '3', '--connect-timeout', '30', '--speed-time', '120', '--speed-limit', '100000', '-C', '-', '-o', str(partial), url], check=True)
-        if partial.stat().st_size != item['size']:
-            raise RuntimeError('Size mismatch: ' + str(partial))
-        source = partial
-    else:
-        source = dest
+    if dest.exists():
+        try:
+            verify(dest, item)
+            print('Verified existing ' + item['destination'], flush=True)
+            return
+        except RuntimeError:
+            print('Replacing invalid existing file: ' + item['destination'], flush=True)
+
+    # A separate local_dir per manifest entry prevents filename collisions.
+    # Hugging Face keeps resumable download metadata in this directory.
+    stage = staging_path(item, root)
+    stage.mkdir(parents=True, exist_ok=True)
+    print('Downloading with hf_xet: ' + item['destination'], flush=True)
+    source = Path(hf_hub_download(
+        repo_id=item['repo'], filename=item['filename'],
+        revision=item['revision'], local_dir=stage,
+    ))
     print('SHA256 ' + item['destination'], flush=True)
-    h = hashlib.sha256()
-    with source.open('rb') as f:
-        for b in iter(lambda: f.read(16 * 1024 * 1024), b''):
-            h.update(b)
-    if h.hexdigest() != item['sha256']:
-        raise RuntimeError('Checksum mismatch: ' + str(source))
-    if source != dest:
-        os.replace(source, dest)
+    verify(source, item)
+    os.replace(source, dest)
     print('Verified ' + item['destination'], flush=True)
 
 
-if __name__ == '__main__':
-    manifest = json.loads(Path(sys.argv[1]).read_text())
-    root = Path(sys.argv[2])
+def downloaded_bytes(item, root):
+    dest = root / item['destination']
+    if dest.exists() and dest.stat().st_size == item['size']:
+        return item['size']
+    stage = staging_path(item, root) / item['filename']
+    if stage.exists():
+        return min(item['size'], stage.stat().st_size)
+    # huggingface_hub writes Xet data to an .incomplete file under its local
+    # metadata directory, then moves it into place. Include that file so the
+    # deployment progress continues moving while a large model transfers.
+    temporary_dir = staging_path(item, root) / '.cache/huggingface/download' / Path(item['filename']).parent
+    if temporary_dir.exists():
+        incomplete = (path.stat().st_size for path in temporary_dir.glob('*.incomplete'))
+        return min(item['size'], max(incomplete, default=0))
+    return 0
+
+
+def main(manifest_path, root):
+    manifest = json.loads(Path(manifest_path).read_text())
+    root = Path(root)
     total = sum(item['size'] for item in manifest['files'])
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         futures = [pool.submit(download, item, root) for item in manifest['files']]
         pending = set(futures)
         while pending:
-            done, pending = concurrent.futures.wait(pending, timeout=20,
-                                                     return_when=concurrent.futures.FIRST_COMPLETED)
+            done, pending = concurrent.futures.wait(
+                pending, timeout=20,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
             for future in done:
                 future.result()
-            obtained = 0
-            for item in manifest['files']:
-                target = root / item['destination']
-                partial = target.with_name(target.name + '.part')
-                obtained += min(item['size'], target.stat().st_size if target.exists()
-                                else partial.stat().st_size if partial.exists() else 0)
+            obtained = sum(downloaded_bytes(item, root) for item in manifest['files'])
+            percent = 100 if not pending else min(99, round(100 * obtained / total))
             print(f'Model data: {obtained / 2**30:.1f} / {total / 2**30:.1f} GiB '
-                  f'({100 * obtained / total:.0f}%)', flush=True)
+                  f'({percent}%)', flush=True)
     print('ALL_MODELS_VERIFIED', flush=True)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1], sys.argv[2])
