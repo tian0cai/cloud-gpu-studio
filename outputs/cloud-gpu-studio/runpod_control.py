@@ -326,13 +326,17 @@ if __name__ == '__main__':
     parser.add_argument('command', choices=['status', 'offers', 'start', 'resume', 'stop', 'connect'])
     command = parser.parse_args().command
     if command == 'status':
-        s = state()
-        pod = current_pod()
-        old_id = s.get('volume', {}).get('id')
-        old_volume = next((v for v in request('networkvolumes') if v['id'] == old_id), None) if old_id else None
-        print(json.dumps({'pod': pod, 'storage_mode': s.get('storage_mode', 'network_volume'),
-                          'old_network_volume_still_billed': old_volume,
-                          'balance': gql('query { myself { clientBalance } }')['myself']['clientBalance']}, indent=2))
+        try:
+            s = state()
+            pod = current_pod()
+            old_id = s.get('volume', {}).get('id')
+            old_volume = next((v for v in request('networkvolumes') if v['id'] == old_id), None) if old_id else None
+            print(json.dumps({'pod': pod, 'storage_mode': s.get('storage_mode', 'network_volume'),
+                              'old_network_volume_still_billed': old_volume,
+                              'balance': gql('query { myself { clientBalance } }')['myself']['clientBalance']}, indent=2))
+        except Exception as error:
+            print(f'RunPod 状态暂不可用，应用会自动重试：{error}', file=sys.stderr)
+            sys.exit(1)
     elif command == 'offers':
         print(json.dumps(offer_catalog(selected_price_limit())))
     else:

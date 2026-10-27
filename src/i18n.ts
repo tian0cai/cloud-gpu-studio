@@ -1,6 +1,8 @@
 export type Language = 'zh-CN' | 'en-US';
 
 const english: Record<string, string> = {
+  '状态暂不可用 · 自动重试中': 'Status temporarily unavailable · retrying',
+  '云端状态读取已恢复。': 'Cloud status is available again.',
   'H3 注意力加速': 'H3 attention acceleration', '标准（画质优先）': 'Standard (quality first)', 'Sol-Attn（实验）': 'Sol-Attn (experimental)', '应用到下一次生成': 'Apply to next generation', '不会改变现有工作流；Sol-Attn 需要云端 CUDA 算子支持。': 'Keeps the current workflow; Sol-Attn needs a compatible cloud CUDA kernel.', 'Sol-Attn 已启用；下一次 H3 任务生效。请比较速度和参考图一致性。': 'Sol-Attn is on for the next H3 job. Compare speed and reference fidelity.', '标准注意力已启用；下一次 H3 任务生效。': 'Standard attention is on for the next H3 job.',
   '空闲自动删：关': 'Auto-delete: Off', '空闲自动删：开': 'Auto-delete: On', '应用运行期间，本地与云端队列空闲 5 分钟后弹出 15 秒倒计时；状态不明时不会自动删除。': 'While the app is running, 5 idle minutes across both queues trigger a 15-second countdown. Unknown status prevents deletion.', '取消部署会保留机器；开启自动删除后，双端队列空闲 5 分钟会弹出 15 秒倒计时。关闭应用不会自动删除。': 'Cancelling deployment keeps the machine. When enabled, auto-delete warns after both queues are idle for 5 minutes. Closing the app does not delete the machine.',
   '空闲自动删除': 'Automatic idle deletion', '已开启': 'On', '已关闭': 'Off', '本地与云端 ComfyUI 的执行中、等待中队列持续空闲 5 分钟后，弹出 15 秒倒计时窗口；没有选择“保留机器”就自动删除。GPU 使用率不参与判断。': 'After both local and cloud ComfyUI queues stay empty for 5 minutes, a 15-second countdown appears. The machine is deleted unless you choose Keep machine. GPU usage is not used.', '正在读取监控设置…': 'Loading idle monitor settings…', '应用需要保持运行；队列或连接状态无法确认时不会自动删除。': 'Keep the app running. Unknown queue or connection status prevents automatic deletion.', '已关闭；机器不会因空闲自动删除。': 'Off; the machine will not be deleted for idleness.', '监控已启用，等待机器连接及队列状态确认。': 'Monitoring is on; waiting for the machine and queue status.',
@@ -49,6 +51,7 @@ function translate(source: string): string {
     [/^检查更新失败：(.+)$/, error => `Update check failed: ${error}`],
     [/^读取安装状态失败：(.+)$/, error => `Could not read installation status: ${error}`],
     [/^读取失败：(.+)$/, error => `Read failed: ${error}`],
+    [/^状态读取暂不可用：(.+)$/, error => `Status temporarily unavailable: ${error}`],
     [/^配置读取失败：(.+)$/, error => `Could not load configuration: ${error}`],
     [/^保存失败：(.+)$/, error => `Save failed: ${error}`],
     [/^下载失败：(.+)$/, error => `Download failed: ${error}`],

@@ -243,6 +243,7 @@ let lastModelPercent: number | null = null;
 let lastStageIndex = 0;
 let nativeOpened = false;
 let refreshing = false;
+let statusReadError = '';
 let progressMode: 'start' | 'cancel' | 'delete' = 'start';
 let packDirty = false;
 let localComfy: LocalComfy | null = null;
@@ -692,11 +693,15 @@ async function refresh() {
   refreshing = true;
   try {
     const status = await invoke<Status>('get_status');
+    if (statusReadError) appendLog('云端状态读取已恢复。');
+    statusReadError = '';
     renderStatus(status);
     if (lastError && !operating) el<HTMLElement>('phase-message').textContent = lastError;
   } catch (error) {
-    el<HTMLElement>('top-status').textContent = '状态读取失败';
-    appendLog(`状态读取失败：${String(error)}`, 'error');
+    const message = String(error).trim().split('\n').filter(Boolean).at(-1) ?? '未知错误';
+    el<HTMLElement>('top-status').textContent = '状态暂不可用 · 自动重试中';
+    if (message !== statusReadError) appendLog(`状态读取暂不可用：${message}`, 'error');
+    statusReadError = message;
   } finally {
     refreshing = false;
   }
