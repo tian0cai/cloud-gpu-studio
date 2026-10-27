@@ -179,7 +179,7 @@ fn save_idle_guard(enabled: bool) -> Result<(), String> {
     std::fs::rename(temporary, path).map_err(|e| e.to_string())
 }
 
-fn comfy_queue_empty(port: u16) -> Result<bool, String> {
+fn comfy_queue_response(port: u16) -> Result<Vec<u8>, String> {
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
         .map_err(|e| e.to_string())?;
@@ -188,20 +188,38 @@ fn comfy_queue_empty(port: u16) -> Result<bool, String> {
         .map_err(|e| e.to_string())?;
     let mut response = Vec::new();
     stream.take(1024 * 1024).read_to_end(&mut response).map_err(|e| e.to_string())?;
-    parse_comfy_queue(&response)
+    Ok(response)
 }
 
-fn parse_comfy_queue(response: &[u8]) -> Result<bool, String> {
+fn parse_comfy_queue_value(response: &[u8]) -> Result<Value, String> {
     let split = response.windows(4).position(|bytes| bytes == b"\r\n\r\n")
         .ok_or("ComfyUI 队列响应不完整")?;
     let header = String::from_utf8_lossy(&response[..split]);
     if !header.starts_with("HTTP/1.0 200 ") && !header.starts_with("HTTP/1.1 200 ") {
         return Err("ComfyUI 队列查询失败".into());
     }
-    let value: Value = serde_json::from_slice(&response[split + 4..]).map_err(|e| e.to_string())?;
+    serde_json::from_slice(&response[split + 4..]).map_err(|e| e.to_string())
+}
+
+fn parse_comfy_queue(response: &[u8]) -> Result<bool, String> {
+    let value = parse_comfy_queue_value(response)?;
     let running = value["queue_running"].as_array().ok_or("缺少执行中队列")?;
     let pending = value["queue_pending"].as_array().ok_or("缺少待执行队列")?;
     Ok(running.is_empty() && pending.is_empty())
+}
+
+fn comfy_queue_empty(port: u16) -> Result<bool, String> {
+    parse_comfy_queue(&comfy_queue_response(port)?)
+}
+
+fn running_comfy_client_id(response: &[u8]) -> Option<String> {
+    let value = parse_comfy_queue_value(response).ok()?;
+    let id = value["queue_running"].as_array()?.first()?.get(3)?.get("client_id")?.as_str()?;
+    if id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(id.to_owned())
+    } else {
+        None
+    }
 }
 
 fn machine_running(status: &Status) -> bool {
@@ -783,7 +801,7 @@ async fn stop_local_comfy(app: AppHandle, controller: State<'_, Arc<Controller>>
             return Err(format!("本地 ComfyUI 仍在运行，请在终端中关闭后重试{detail}。"));
         }
         if let Some(window) = app.get_webview_window("comfy") {
-            let _ = window.close();
+            let _ = window.destroy();
         }
         Ok(())
     }).await.map_err(|e| format!("停止本地 ComfyUI 任务失败：{e}"))?
@@ -1094,10 +1112,20 @@ async fn open_comfy_window(app: AppHandle, controller: State<'_, Arc<Controller>
         return Ok(());
     }
     let url = "http://127.0.0.1:8188/".parse().map_err(|e| format!("ComfyUI 地址无效：{e}"))?;
+    // ComfyUI routes progress to the client ID that queued the running prompt.
+    // A newly created webview has empty sessionStorage, so recover that ID from
+    // the local queue before its frontend opens the WebSocket.
+    let mut initialization = COMFY_DRAW_GUARD.to_owned();
+    if let Ok(queue) = comfy_queue_response(8188) {
+        if let Some(id) = running_comfy_client_id(&queue) {
+            let quoted = serde_json::to_string(&id).map_err(|e| e.to_string())?;
+            initialization.push_str(&format!("\ntry {{ sessionStorage.setItem('clientId', {quoted}); }} catch (_) {{}}"));
+        }
+    }
     WebviewWindowBuilder::new(&app, "comfy", WebviewUrl::External(url))
         .title("ComfyUI · Cloud GPU Studio")
         .inner_size(1440.0, 900.0)
-        .initialization_script(COMFY_DRAW_GUARD)
+        .initialization_script(&initialization)
         .build().map_err(|e| format!("无法打开 ComfyUI 窗口：{e}"))?;
     Ok(())
 }
@@ -1122,6 +1150,14 @@ pub fn run() {
             get_idle_guard, set_idle_guard, keep_idle_machine, delete_idle_machine])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "comfy" {
+                    // Keep the webview and its session ID alive when only its
+                    // window is closed. The explicit Stop ComfyUI action uses
+                    // destroy() to release it and stop the local server.
+                    api.prevent_close();
+                    let _ = window.hide();
+                    return;
+                }
                 let state = window.app_handle().state::<Arc<Controller>>();
                 if window.label() == "main" && state.busy.load(Ordering::SeqCst) {
                     api.prevent_close();
@@ -1156,6 +1192,15 @@ mod idle_tests {
         assert_eq!(parse_comfy_queue(&response(r#"{"queue_running":[],"queue_pending":[[2]]}"#)), Ok(false));
         assert!(parse_comfy_queue(&response(r#"{"queue_running":[]}"#)).is_err());
         assert!(parse_comfy_queue(b"HTTP/1.0 503 Unavailable\r\n\r\n{}").is_err());
+    }
+
+    #[test]
+    fn running_prompt_client_id_can_restore_progress_after_reopening() {
+        let body = r#"{"queue_running":[[1,"prompt",{},{"client_id":"a3a53ee178eb4cda9157ab5738adeb57"}]],"queue_pending":[]}"#;
+        let response = format!("HTTP/1.0 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        assert_eq!(running_comfy_client_id(response.as_bytes()).as_deref(),
+                   Some("a3a53ee178eb4cda9157ab5738adeb57"));
+        assert_eq!(running_comfy_client_id(b"HTTP/1.0 200 OK\r\n\r\n{\"queue_running\":[]}"), None);
     }
 
     #[test]
