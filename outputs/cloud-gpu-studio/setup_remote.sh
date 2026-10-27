@@ -43,7 +43,8 @@ if [ ! -e /workspace/comfy-env ]; then
     echo 'Local container storage is below 12 GB; Python environment is on /workspace.'
   fi
 fi
-/workspace/comfy-env/bin/python -m pip install -r requirements.txt > /workspace/logs/install.log 2>&1 &
+/workspace/comfy-env/bin/python -m pip install --disable-pip-version-check \
+  --no-compile -r requirements.txt > /workspace/logs/install.log 2>&1 &
 pip_pid=$!
 install_started=$(date +%s)
 (

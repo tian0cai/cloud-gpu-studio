@@ -1,5 +1,6 @@
 import ast
 import io
+import math
 import types
 import unittest
 import uuid
@@ -14,6 +15,8 @@ class BridgeReconnectTests(unittest.TestCase):
         tree = ast.parse(SOURCE.read_text())
         selected = [node for node in tree.body if isinstance(node, ast.ClassDef)
                     and node.name in {'CloudConnectionError', 'RemoteClient'}]
+        selected_functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                              and node.name == 'reference_dimensions']
         class Timeout(Exception):
             pass
         class ConnectionError(Exception):
@@ -30,15 +33,23 @@ class BridgeReconnectTests(unittest.TestCase):
             def fromarray(array):
                 return types.SimpleNamespace(save=lambda buffer, format: buffer.write(b'PNG'))
         namespace = {'requests': requests, 'ENDPOINT': 'http://127.0.0.1:8189',
-                     'time': types.SimpleNamespace(sleep=lambda seconds: None),
+                     'math': math,
+                     'time': types.SimpleNamespace(sleep=lambda seconds: None,
+                                                   monotonic=lambda: 0),
                      'io': io, 'uuid': uuid, 'Image': Image,
                      'np': types.SimpleNamespace(clip=lambda array, low, high: array,
                                                  uint8=object())}
-        exec(compile(ast.Module(body=selected, type_ignores=[]), str(SOURCE), 'exec'), namespace)
+        exec(compile(ast.Module(body=selected_functions + selected, type_ignores=[]),
+                     str(SOURCE), 'exec'), namespace)
         cls.RemoteClient = namespace['RemoteClient']
         cls.CloudConnectionError = namespace['CloudConnectionError']
         cls.Timeout = Timeout
         cls.Pixels = Pixels
+        cls.reference_dimensions = staticmethod(namespace['reference_dimensions'])
+
+    def test_reference_dimensions_match_h3_canvas(self):
+        self.assertEqual(self.reference_dimensions(5120, 2880, 1280, 720), (1280, 704))
+        self.assertEqual(self.reference_dimensions(800, 600, 1280, 720), (800, 608))
 
     def test_get_recovers_after_transient_tunnel_timeout(self):
         response = types.SimpleNamespace(ok=True)
@@ -63,6 +74,17 @@ class BridgeReconnectTests(unittest.TestCase):
         with self.assertRaises(self.CloudConnectionError):
             client.request('POST', '/prompt', json={})
         self.assertEqual(len(calls), 1)
+
+    def test_image_upload_has_a_longer_read_timeout(self):
+        calls = []
+        def request(*args, **kwargs):
+            calls.append(kwargs['timeout'])
+            return types.SimpleNamespace(ok=True)
+        client = object.__new__(self.RemoteClient)
+        client.session = types.SimpleNamespace(request=request)
+        client.request('POST', '/upload/image')
+        client.request('POST', '/prompt')
+        self.assertEqual(calls, [(10, 300), (10, 120)])
 
     def test_image_upload_retries_after_connection_loss(self):
         client = object.__new__(self.RemoteClient)

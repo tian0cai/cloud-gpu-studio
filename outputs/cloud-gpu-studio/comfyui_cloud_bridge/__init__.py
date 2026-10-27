@@ -4,6 +4,7 @@
 import asyncio
 import io
 import json
+import math
 import os
 import queue
 import threading
@@ -163,6 +164,13 @@ class CloudConnectionError(RuntimeError):
     """A temporary failure reaching the SSH-forwarded cloud ComfyUI."""
 
 
+def reference_dimensions(source_width, source_height, video_width, video_height):
+    """Match MiniMaxH3ReferenceToVideo's downscale for ref_image_size=match."""
+    scale = min(1.0, math.sqrt((video_width * video_height) / (source_width * source_height)))
+    return (max(32, round(source_width * scale / 32) * 32),
+            max(32, round(source_height * scale / 32) * 32))
+
+
 class RemoteClient:
     def __init__(self):
         self.session = requests.Session()
@@ -172,10 +180,13 @@ class RemoteClient:
         # GETs are safe to repeat while the desktop app reopens a dropped SSH
         # tunnel. Do not repeat POST /prompt here: that could create two jobs.
         attempts = 6 if method.upper() == 'GET' else 1
+        # Uploads can wait behind a busy cloud ComfyUI event loop. Keep the
+        # longer read timeout limited to this repeatable endpoint.
+        timeout = (10, 300) if method.upper() == 'POST' and path == '/upload/image' else (10, 120)
         for attempt in range(attempts):
             try:
                 response = self.session.request(method, ENDPOINT + path,
-                                                timeout=(10, 120), **kwargs)
+                                                timeout=timeout, **kwargs)
                 break
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as error:
                 if attempt + 1 == attempts:
@@ -185,20 +196,32 @@ class RemoteClient:
             raise RuntimeError(f'Cloud GPU HTTP {response.status_code}: {response.text[:2000]}')
         return response
 
-    def upload(self, image):
+    def upload(self, image, reference_size=None):
         if image is None:
             return None
         buffer = io.BytesIO()
         pixels = np.clip(image[0].cpu().numpy() * 255, 0, 255).astype(np.uint8)
-        Image.fromarray(pixels).save(buffer, format='PNG')
+        prepared = Image.fromarray(pixels)
+        if reference_size is not None:
+            target = reference_dimensions(prepared.width, prepared.height, *reference_size)
+            if target[0] * target[1] < prepared.width * prepared.height:
+                prepared = prepared.resize(target, Image.Resampling.LANCZOS)
+        prepared.save(buffer, format='PNG')
         filename = f'local_{uuid.uuid4().hex}.png'
+        payload = buffer.getvalue()
         for attempt in range(3):
+            started = time.monotonic()
             try:
                 data = self.request('POST', '/upload/image',
-                                    files={'image': (filename, buffer.getvalue(), 'image/png')},
+                                    files={'image': (filename, payload, 'image/png')},
                                     data={'type': 'input'}).json()
+                print(f'Cloud image upload complete: {len(payload)} bytes, '
+                      f'{time.monotonic() - started:.1f}s, attempt {attempt + 1}', flush=True)
                 break
-            except CloudConnectionError:
+            except CloudConnectionError as error:
+                print(f'Cloud image upload interrupted: {len(payload)} bytes, '
+                      f'{time.monotonic() - started:.1f}s, attempt {attempt + 1}: {error}',
+                      flush=True)
                 if attempt == 2:
                     raise
                 time.sleep(5)
@@ -383,7 +406,8 @@ class CloudH3Video:
         if video_mode() == 'ref2va':
             if lora_strength > 0:
                 raise ValueError('当前 LoRA 仅用于 FL2VA；Ref2VA 模式请将 LoRA 强度设为 0。')
-            uploaded = [client.upload(image) for image in images if image is not None]
+            uploaded = [client.upload(image, reference_size=(width, height))
+                        for image in images if image is not None]
             graph = h3_reference_graph(prompt, seed, steps, width, height, frames, uploaded)
         else:
             if any(image is not None for image in images[1:]):
