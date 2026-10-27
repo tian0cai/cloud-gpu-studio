@@ -214,7 +214,9 @@ fn comfy_queue_empty(port: u16) -> Result<bool, String> {
 
 fn running_comfy_client_id(response: &[u8]) -> Option<String> {
     let value = parse_comfy_queue_value(response).ok()?;
-    let id = value["queue_running"].as_array()?.first()?.get(3)?.get("client_id")?.as_str()?;
+    let active = value["queue_running"].as_array()?.first()
+        .or_else(|| value["queue_pending"].as_array()?.first())?;
+    let id = active.get(3)?.get("client_id")?.as_str()?;
     if id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         Some(id.to_owned())
     } else {
@@ -1198,6 +1200,10 @@ mod idle_tests {
     fn running_prompt_client_id_can_restore_progress_after_reopening() {
         let body = r#"{"queue_running":[[1,"prompt",{},{"client_id":"a3a53ee178eb4cda9157ab5738adeb57"}]],"queue_pending":[]}"#;
         let response = format!("HTTP/1.0 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        assert_eq!(running_comfy_client_id(response.as_bytes()).as_deref(),
+                   Some("a3a53ee178eb4cda9157ab5738adeb57"));
+        let pending = r#"{"queue_running":[],"queue_pending":[[1,"prompt",{},{"client_id":"a3a53ee178eb4cda9157ab5738adeb57"}]]}"#;
+        let response = format!("HTTP/1.0 200 OK\r\nContent-Length: {}\r\n\r\n{pending}", pending.len());
         assert_eq!(running_comfy_client_id(response.as_bytes()).as_deref(),
                    Some("a3a53ee178eb4cda9157ab5738adeb57"));
         assert_eq!(running_comfy_client_id(b"HTTP/1.0 200 OK\r\n\r\n{\"queue_running\":[]}"), None);
